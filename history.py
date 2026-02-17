@@ -754,83 +754,111 @@ with tab_range:
     
     with tab_r4:
         st.subheader("Correlation & Regression Matrix")
-        st.markdown("Calculate correlations and regression metrics for all instrument pairs by type.")
-        
-        col_m1, col_m2, col_m3 = st.columns(3)
-        with col_m1:
-            corr_market = st.selectbox("Market", ["LOIS", "ER"], key="corr_market")
-        with col_m2:
-            corr_type = st.selectbox("Instrument Type", ["Outright", "Spread", "Fly"], key="corr_type")
-        with col_m3:
-            corr_window = st.number_input("Regression Window (Days)", 30, 252, 90, key="corr_window_input")
-        
-        if st.button("Calculate Correlation & Regression Matrix", key="calc_corr_reg"):
-            def build_all_instruments(df_master, prefix, inst_type):
-                """Build all instruments of a given type."""
-                cols = get_cols(df_master, prefix + "_")
-                cols = [c for c in cols if "_F" in c or "Spot" in c]
-                inst_dict = {}
-                
-                if inst_type == "Outright":
-                    for col in cols:
-                        ser = df_master[col].dropna()
+        st.markdown("Calculate correlations and regression metrics for all instrument pairs or anchor vs all.")
+
+        def build_all_instruments(df_master, prefix, inst_type):
+            """Build all instruments of a given type."""
+            cols = get_cols(df_master, prefix + "_")
+            cols = [c for c in cols if "_F" in c or "Spot" in c]
+            inst_dict = {}
+
+            if inst_type == "Outright":
+                for col in cols:
+                    ser = df_master[col].dropna()
+                    if not ser.empty:
+                        inst_dict[col] = ser
+            elif inst_type == "Spread":
+                for i in range(len(cols) - 1):
+                    for j in range(i + 1, len(cols)):
+                        name = f"{cols[i]}-{cols[j]}"
+                        ser = (df_master[cols[i]] - df_master[cols[j]]).dropna()
                         if not ser.empty:
-                            inst_dict[col] = ser
-                elif inst_type == "Spread":
-                    for i in range(len(cols) - 1):
-                        for j in range(i+1, len(cols)):
-                            name = f"{cols[i]}-{cols[j]}"
-                            ser = (df_master[cols[i]] - df_master[cols[j]]).dropna()
+                            inst_dict[name] = ser
+            else:  # Fly
+                for i in range(len(cols) - 2):
+                    for j in range(i + 1, len(cols) - 1):
+                        for k in range(j + 1, len(cols)):
+                            name = f"{cols[i]}-{cols[j]}-{cols[k]}"
+                            ser = ((df_master[cols[i]] + df_master[cols[k]]) - (2 * df_master[cols[j]])).dropna()
                             if not ser.empty:
                                 inst_dict[name] = ser
-                else:  # Fly
-                    for i in range(len(cols) - 2):
-                        for j in range(i+1, len(cols)-1):
-                            for k in range(j+1, len(cols)):
-                                name = f"{cols[i]}-{cols[j]}-{cols[k]}"
-                                ser = ((df_master[cols[i]] + df_master[cols[k]]) - (2 * df_master[cols[j]])).dropna()
-                                if not ser.empty:
-                                    inst_dict[name] = ser
-                
-                return inst_dict
-            
-            # Build all instruments
-            inst_dict = build_all_instruments(df_master, corr_market, corr_type)
-            inst_names = list(inst_dict.keys())
-            
-            if len(inst_names) < 2:
-                st.warning(f"Need at least 2 {corr_type} instruments to calculate correlations.")
-            else:
+
+            return inst_dict
+
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            matrix_mode = st.selectbox(
+                "Matrix Mode",
+                ["All pairs (same type)", "Anchor vs all"],
+                key="corr_reg_mode"
+            )
+        with col_m2:
+            corr_window = st.number_input("Regression Window (Days)", 30, 252, 90, key="corr_window_input")
+
+        if matrix_mode == "All pairs (same type)":
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                corr_market = st.selectbox("Market", ["LOIS", "ER"], key="corr_market")
+            with col_a2:
+                corr_type = st.selectbox("Instrument Type", ["Outright", "Spread", "Fly"], key="corr_type")
+        else:
+            st.markdown("**Anchor**")
+            col_anchor1, col_anchor2 = st.columns(2)
+            with col_anchor1:
+                anchor_market = st.selectbox("Anchor Market", ["LOIS", "ER"], key="anchor_market")
+            with col_anchor2:
+                anchor_type = st.selectbox("Anchor Type", ["Outright", "Spread", "Fly"], key="anchor_type")
+
+            anchor_series, anchor_title = build_series_from_selection(
+                df_master, anchor_market, anchor_type, "anchor_matrix"
+            )
+            anchor_name = anchor_title.split(": ", 1)[1] if ": " in anchor_title else anchor_title
+
+            st.markdown("**Targets**")
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                target_market = st.selectbox("Target Market", ["LOIS", "ER"], key="target_market")
+            with col_t2:
+                target_types = st.multiselect(
+                    "Target Types",
+                    ["Outright", "Spread", "Fly"],
+                    default=["Outright", "Spread", "Fly"],
+                    key="target_types"
+                )
+
+        if st.button("Calculate Correlation & Regression Matrix", key="calc_corr_reg"):
+            if matrix_mode == "All pairs (same type)":
+                inst_dict = build_all_instruments(df_master, corr_market, corr_type)
+                inst_names = list(inst_dict.keys())
+
+                if len(inst_names) < 2:
+                    st.warning(f"Need at least 2 {corr_type} instruments to calculate correlations.")
+                    st.stop()
+
                 with st.spinner("Calculating correlations and regressions..."):
                     results = []
-                    
-                    # Compare all pairs
+
                     for i in range(len(inst_names)):
-                        for j in range(i+1, len(inst_names)):
+                        for j in range(i + 1, len(inst_names)):
                             inst1_name = inst_names[i]
                             inst2_name = inst_names[j]
-                            
+
                             ser1 = inst_dict[inst1_name]
                             ser2 = inst_dict[inst2_name]
-                            
-                            # Align and get % change
+
                             pct1 = ser1.pct_change().replace([np.inf, -np.inf], np.nan)
                             pct2 = ser2.pct_change().replace([np.inf, -np.inf], np.nan)
-                            
+
                             aligned_df = pd.concat([pct1, pct2], axis=1).iloc[-corr_window:].dropna()
-                            
+
                             if len(aligned_df) < 30:
                                 continue
-                            
-                            # Correlation
+
                             corr = aligned_df.corr().iloc[0, 1]
-                            
-                            # Regression
                             x_vals = aligned_df.iloc[:, 0].to_numpy()
                             y_vals = aligned_df.iloc[:, 1].to_numpy()
-                            
                             slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
-                            
+
                             results.append({
                                 "Instrument 1": inst1_name,
                                 "Instrument 2": inst2_name,
@@ -840,25 +868,70 @@ with tab_range:
                                 "P-Value": p_value,
                                 "Observations": len(aligned_df)
                             })
-                    
-                    if results:
-                        df_results = pd.DataFrame(results).sort_values("Correlation", ascending=False)
-                        
-                        # Format and style
-                        styled = df_results.style.format({
-                            "Correlation": "{:.4f}",
-                            "Beta": "{:.4f}",
-                            "R-Squared": "{:.4f}",
-                            "P-Value": "{:.4f}"
+            else:
+                if anchor_series.empty:
+                    st.warning("Anchor series has no data.")
+                    st.stop()
+
+                if not target_types:
+                    st.warning("Select at least one target type.")
+                    st.stop()
+
+                target_dict = {}
+                for t_type in target_types:
+                    for name, ser in build_all_instruments(df_master, target_market, t_type).items():
+                        target_dict[name] = (t_type, ser)
+
+                if not target_dict:
+                    st.warning("No target instruments found for the selected types.")
+                    st.stop()
+
+                with st.spinner("Calculating correlations and regressions..."):
+                    results = []
+                    anchor_pct = anchor_series.pct_change().replace([np.inf, -np.inf], np.nan)
+
+                    for target_name, (target_type, target_ser) in target_dict.items():
+                        if target_name == anchor_name:
+                            continue
+
+                        target_pct = target_ser.pct_change().replace([np.inf, -np.inf], np.nan)
+                        aligned_df = pd.concat([anchor_pct, target_pct], axis=1).iloc[-corr_window:].dropna()
+
+                        if len(aligned_df) < 30:
+                            continue
+
+                        corr = aligned_df.corr().iloc[0, 1]
+                        x_vals = aligned_df.iloc[:, 0].to_numpy()
+                        y_vals = aligned_df.iloc[:, 1].to_numpy()
+                        slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
+
+                        results.append({
+                            "Anchor": anchor_title,
+                            "Instrument": target_name,
+                            "Type": target_type,
+                            "Correlation": corr,
+                            "Beta": slope,
+                            "R-Squared": r_value**2,
+                            "P-Value": p_value,
+                            "Observations": len(aligned_df)
                         })
-                        styled = styled.background_gradient(subset=["Correlation", "R-Squared"], cmap="RdYlGn", vmin=-1, vmax=1)
-                        styled = styled.background_gradient(subset=["Beta"], cmap="RdBu_r")
-                        
-                        st.dataframe(styled, use_container_width=True, height=600)
-                        
-                        st.info(f"**Total pairs calculated:** {len(df_results)}")
-                    else:
-                        st.warning("No valid pairs found for regression analysis.")
+
+            if results:
+                df_results = pd.DataFrame(results).sort_values("Correlation", ascending=False)
+
+                styled = df_results.style.format({
+                    "Correlation": "{:.4f}",
+                    "Beta": "{:.4f}",
+                    "R-Squared": "{:.4f}",
+                    "P-Value": "{:.4f}"
+                })
+                styled = styled.background_gradient(subset=["Correlation", "R-Squared"], cmap="RdYlGn", vmin=-1, vmax=1)
+                styled = styled.background_gradient(subset=["Beta"], cmap="RdBu_r")
+
+                st.dataframe(styled, use_container_width=True, height=600)
+                st.info(f"**Total pairs calculated:** {len(df_results)}")
+            else:
+                st.warning("No valid pairs found for regression analysis.")
 
 # =====================================================================
 # TAB 5: RISK MANAGEMENT
