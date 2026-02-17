@@ -26,6 +26,15 @@ def get_contract_num(col_name):
     match = re.search(r'(\d+)', str(col_name))
     return int(match.group(1)) if match else 0
 
+def parse_axis_limit(value):
+    value = str(value).strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
 # --- INITIALIZE ECB CALENDAR DATA ---
 def get_default_ecb_data():
     data = [
@@ -344,6 +353,13 @@ with tab_zscore:
     # Chart
     use_dual_axis = ("LOIS" in datasets_list) and ("ER" in datasets_list)
 
+    if use_dual_axis:
+        with st.expander("Y-axis ranges (optional)"):
+            z_left_min = st.text_input("Left Y min (LOIS)", "", key="zscore_y_left_min")
+            z_left_max = st.text_input("Left Y max (LOIS)", "", key="zscore_y_left_max")
+            z_right_min = st.text_input("Right Y min (ER)", "", key="zscore_y_right_min")
+            z_right_max = st.text_input("Right Y max (ER)", "", key="zscore_y_right_max")
+
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -416,6 +432,14 @@ with tab_zscore:
     if use_dual_axis:
         fig.update_yaxes(title_text="LOIS", row=1, col=1, secondary_y=False)
         fig.update_yaxes(title_text="ER", row=1, col=1, secondary_y=True)
+        left_min = parse_axis_limit(z_left_min)
+        left_max = parse_axis_limit(z_left_max)
+        right_min = parse_axis_limit(z_right_min)
+        right_max = parse_axis_limit(z_right_max)
+        if left_min is not None and left_max is not None:
+            fig.update_yaxes(range=[left_min, left_max], row=1, col=1, secondary_y=False)
+        if right_min is not None and right_max is not None:
+            fig.update_yaxes(range=[right_min, right_max], row=1, col=1, secondary_y=True)
 
     fig.update_layout(height=800, template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
@@ -463,6 +487,12 @@ with tab_corr:
         # Chart 1: Time Series
         fig1 = go.Figure()
         use_dual_axis_ts = ds1 != ds2
+        if use_dual_axis_ts:
+            with st.expander("Y-axis ranges (optional)"):
+                corr_left_min = st.text_input("Left Y min (LOIS)", "", key="corr_y_left_min")
+                corr_left_max = st.text_input("Left Y max (LOIS)", "", key="corr_y_left_max")
+                corr_right_min = st.text_input("Right Y min (ER)", "", key="corr_y_right_min")
+                corr_right_max = st.text_input("Right Y max (ER)", "", key="corr_y_right_max")
         fig1.add_trace(go.Scatter(x=series1.index, y=series1, name=title1, yaxis='y'))
         fig1.add_trace(go.Scatter(x=series2.index, y=series2, name=title2, yaxis='y2' if use_dual_axis_ts else 'y'))
         if use_dual_axis_ts:
@@ -472,6 +502,14 @@ with tab_corr:
                 yaxis2=dict(title=title2, overlaying='y', side='right'),
                 height=450, template="plotly_white"
             )
+            left_min = parse_axis_limit(corr_left_min)
+            left_max = parse_axis_limit(corr_left_max)
+            right_min = parse_axis_limit(corr_right_min)
+            right_max = parse_axis_limit(corr_right_max)
+            if left_min is not None and left_max is not None:
+                fig1.update_yaxes(range=[left_min, left_max], secondary_y=False)
+            if right_min is not None and right_max is not None:
+                fig1.update_yaxes(range=[right_min, right_max], secondary_y=True)
         else:
             fig1.update_layout(
                 title="Time Series Comparison",
@@ -788,6 +826,12 @@ with tab_range:
             
             fig_curve = go.Figure()
             use_dual_axis_curve = include_c2 and (ds_c1 != ds_c2)
+            if use_dual_axis_curve:
+                with st.expander("Y-axis ranges (optional)"):
+                    curve_left_min = st.text_input("Left Y min (LOIS)", "", key="curve_y_left_min")
+                    curve_left_max = st.text_input("Left Y max (LOIS)", "", key="curve_y_left_max")
+                    curve_right_min = st.text_input("Right Y min (ER)", "", key="curve_y_right_min")
+                    curve_right_max = st.text_input("Right Y max (ER)", "", key="curve_y_right_max")
             if labels1:
                 fig_curve.add_trace(go.Scatter(x=labels1, y=values1, mode='lines+markers', name=f"{ds_c1} {type_c1}"))
             
@@ -812,6 +856,14 @@ with tab_range:
                     yaxis2=dict(title=f"{ds_c2} Value", overlaying='y', side='right'),
                     height=600, template="plotly_white"
                 )
+                left_min = parse_axis_limit(curve_left_min)
+                left_max = parse_axis_limit(curve_left_max)
+                right_min = parse_axis_limit(curve_right_min)
+                right_max = parse_axis_limit(curve_right_max)
+                if left_min is not None and left_max is not None:
+                    fig_curve.update_yaxes(range=[left_min, left_max], secondary_y=False)
+                if right_min is not None and right_max is not None:
+                    fig_curve.update_yaxes(range=[right_min, right_max], secondary_y=True)
             else:
                 fig_curve.update_layout(
                     title=f"Curve on {curve_date.date()}",
