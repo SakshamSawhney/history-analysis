@@ -295,6 +295,7 @@ with tab_zscore:
     
     series_list = []
     titles_list = []
+    datasets_list = []
     
     if compare_mode:
         num_compare = st.number_input("Number of instruments to compare", 2, 10, 2, 1, key="zscore_num_compare")
@@ -309,6 +310,7 @@ with tab_zscore:
                 ser, tit = build_series_from_selection(df_master, ds, it, f"zscore_comp_{i}")
                 series_list.append(ser)
                 titles_list.append(tit)
+                datasets_list.append(ds)
     else:
         c1, c2 = st.columns(2)
         with c1:
@@ -319,6 +321,7 @@ with tab_zscore:
         series, title = build_series_from_selection(df_master, dataset, inst_type, "zscore")
         series_list.append(series)
         titles_list.append(title)
+        datasets_list.append(dataset)
     
     # Calculations for primary series
     series = series_list[0]
@@ -339,20 +342,55 @@ with tab_zscore:
             z_score_list.append(s_z)
     
     # Chart
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
-                        subplot_titles=("Price & Bands", "Z-Score"))
+    use_dual_axis = ("LOIS" in datasets_list) and ("ER" in datasets_list)
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.7, 0.3],
+        subplot_titles=("Price & Bands", "Z-Score"),
+        specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
+    )
     
     # Add primary series
-    fig.add_trace(go.Scatter(x=series.index, y=series, name=f"{title} (Price)", line=dict(color='black')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=rolling_mean.index, y=rolling_mean, name=f"{title} (Mean)", line=dict(color='blue', dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series.index, y=rolling_mean + rolling_std*entry_z, name="Upper Band", line=dict(color='red', dash='dash'), opacity=0.5), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series.index, y=rolling_mean - rolling_std*entry_z, name="Lower Band", fill='tonexty', fillcolor='rgba(255,0,0,0.1)', line=dict(color='green', dash='dash'), opacity=0.5), row=1, col=1)
+    base_secondary = use_dual_axis and (datasets_list[0] == "ER")
+    fig.add_trace(
+        go.Scatter(x=series.index, y=series, name=f"{title} (Price)", line=dict(color='black')),
+        row=1,
+        col=1,
+        secondary_y=base_secondary
+    )
+    fig.add_trace(
+        go.Scatter(x=rolling_mean.index, y=rolling_mean, name=f"{title} (Mean)", line=dict(color='blue', dash='dot')),
+        row=1,
+        col=1,
+        secondary_y=base_secondary
+    )
+    fig.add_trace(
+        go.Scatter(x=series.index, y=rolling_mean + rolling_std*entry_z, name="Upper Band", line=dict(color='red', dash='dash'), opacity=0.5),
+        row=1,
+        col=1,
+        secondary_y=base_secondary
+    )
+    fig.add_trace(
+        go.Scatter(x=series.index, y=rolling_mean - rolling_std*entry_z, name="Lower Band", fill='tonexty', fillcolor='rgba(255,0,0,0.1)', line=dict(color='green', dash='dash'), opacity=0.5),
+        row=1,
+        col=1,
+        secondary_y=base_secondary
+    )
     
     # Add comparison series prices if in comparison mode
     if compare_mode:
         colors = ['orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'magenta']
         for i, s in enumerate(series_list[1:]):
-            fig.add_trace(go.Scatter(x=s.index, y=s, name=f"{titles_list[i+1]} (Price)", line=dict(color=colors[i % len(colors)]), opacity=0.7), row=1, col=1)
+            comp_secondary = use_dual_axis and (datasets_list[i + 1] == "ER")
+            fig.add_trace(
+                go.Scatter(x=s.index, y=s, name=f"{titles_list[i+1]} (Price)", line=dict(color=colors[i % len(colors)]), opacity=0.7),
+                row=1,
+                col=1,
+                secondary_y=comp_secondary
+            )
     
     # Z-Score main
     fig.add_trace(go.Scatter(x=z_score.index, y=z_score, name=f"{title} (Z-Score)", line=dict(color='purple')), row=2, col=1)
@@ -375,6 +413,10 @@ with tab_zscore:
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=1, col=1)
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=2, col=1)
     
+    if use_dual_axis:
+        fig.update_yaxes(title_text="LOIS", row=1, col=1, secondary_y=False)
+        fig.update_yaxes(title_text="ER", row=1, col=1, secondary_y=True)
+
     fig.update_layout(height=800, template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
     
@@ -420,14 +462,22 @@ with tab_corr:
         
         # Chart 1: Time Series
         fig1 = go.Figure()
+        use_dual_axis_ts = ds1 != ds2
         fig1.add_trace(go.Scatter(x=series1.index, y=series1, name=title1, yaxis='y'))
-        fig1.add_trace(go.Scatter(x=series2.index, y=series2, name=title2, yaxis='y2'))
-        fig1.update_layout(
-            title="Time Series Comparison",
-            yaxis=dict(title=title1),
-            yaxis2=dict(title=title2, overlaying='y', side='right'),
-            height=450, template="plotly_white"
-        )
+        fig1.add_trace(go.Scatter(x=series2.index, y=series2, name=title2, yaxis='y2' if use_dual_axis_ts else 'y'))
+        if use_dual_axis_ts:
+            fig1.update_layout(
+                title="Time Series Comparison",
+                yaxis=dict(title=title1),
+                yaxis2=dict(title=title2, overlaying='y', side='right'),
+                height=450, template="plotly_white"
+            )
+        else:
+            fig1.update_layout(
+                title="Time Series Comparison",
+                yaxis=dict(title=title1),
+                height=450, template="plotly_white"
+            )
         st.plotly_chart(fig1, use_container_width=True)
         
         # Chart 2: Scatter
@@ -737,19 +787,37 @@ with tab_range:
             labels1, values1 = get_curve_data(df_master, ds_c1, type_c1, curve_date)
             
             fig_curve = go.Figure()
+            use_dual_axis_curve = include_c2 and (ds_c1 != ds_c2)
             if labels1:
                 fig_curve.add_trace(go.Scatter(x=labels1, y=values1, mode='lines+markers', name=f"{ds_c1} {type_c1}"))
             
             if include_c2:
                 labels2, values2 = get_curve_data(df_master, ds_c2, type_c2, curve_date)
                 if labels2:
-                    fig_curve.add_trace(go.Scatter(x=labels2, y=values2, mode='lines+markers', name=f"{ds_c2} {type_c2}"))
+                    fig_curve.add_trace(
+                        go.Scatter(
+                            x=labels2,
+                            y=values2,
+                            mode='lines+markers',
+                            name=f"{ds_c2} {type_c2}",
+                            yaxis='y2' if use_dual_axis_curve else 'y'
+                        )
+                    )
             
-            fig_curve.update_layout(
-                title=f"Curve on {curve_date.date()}",
-                xaxis_title="Contract", yaxis_title="Value",
-                height=600, template="plotly_white"
-            )
+            if use_dual_axis_curve:
+                fig_curve.update_layout(
+                    title=f"Curve on {curve_date.date()}",
+                    xaxis_title="Contract",
+                    yaxis=dict(title=f"{ds_c1} Value"),
+                    yaxis2=dict(title=f"{ds_c2} Value", overlaying='y', side='right'),
+                    height=600, template="plotly_white"
+                )
+            else:
+                fig_curve.update_layout(
+                    title=f"Curve on {curve_date.date()}",
+                    xaxis_title="Contract", yaxis_title="Value",
+                    height=600, template="plotly_white"
+                )
             st.plotly_chart(fig_curve, use_container_width=True)
     
     with tab_r4:
