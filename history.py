@@ -372,7 +372,7 @@ with tab_zscore:
             z_score_list.append(s_z)
     
     # Transform Controls for Price Series
-    with st.expander("📐 Price Transform Controls (optional)"):
+    with st.expander("📐 Price Transform Controls (optional)", expanded=True):
         col_zt1, col_zt2, col_zt3 = st.columns(3)
         with col_zt1:
             z_y_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="zscore_y_offset")
@@ -508,7 +508,7 @@ with tab_corr:
         col_c2.metric("Sample Size", len(aligned_df))
         
         # Transform Controls
-        with st.expander("📐 Transform Controls (optional)"):
+        with st.expander("📐 Transform Controls (optional)", expanded=True):
             col_t1, col_t2 = st.columns(2)
             with col_t1:
                 st.markdown(f"**{title1}**")
