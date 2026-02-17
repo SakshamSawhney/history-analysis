@@ -26,6 +26,39 @@ def get_contract_num(col_name):
     match = re.search(r'(\d+)', str(col_name))
     return int(match.group(1)) if match else 0
 
+def apply_transforms(values, y_offset=0, y_scale=1.0, normalize_to=None):
+    """
+    Apply transformations to y-values.
+    
+    Args:
+        values: array-like y-values
+        y_offset: constant to add to all values
+        y_scale: factor to multiply all values by
+        normalize_to: tuple (min, max) to normalize values to this range
+    
+    Returns:
+        Transformed values
+    """
+    values = np.asarray(values, dtype=float)
+    
+    # Apply offset and scale
+    transformed = (values * y_scale) + y_offset
+    
+    # Normalize to range if specified
+    if normalize_to is not None:
+        target_min, target_max = normalize_to
+        current_min = np.nanmin(transformed)
+        current_max = np.nanmax(transformed)
+        current_range = current_max - current_min
+        
+        if current_range > 0:
+            # Scale to [0, 1] first
+            normalized = (transformed - current_min) / current_range
+            # Scale to target range
+            transformed = normalized * (target_max - target_min) + target_min
+    
+    return transformed
+
 # --- INITIALIZE ECB CALENDAR DATA ---
 def get_default_ecb_data():
     data = [
@@ -338,20 +371,76 @@ with tab_zscore:
             s_z = (s - s_mean) / s_std
             z_score_list.append(s_z)
     
+    # Transform Controls for Price Series
+    with st.expander("📐 Price Transform Controls (optional)"):
+        col_zt1, col_zt2, col_zt3 = st.columns(3)
+        with col_zt1:
+            z_y_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="zscore_y_offset")
+        with col_zt2:
+            z_y_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key="zscore_y_scale")
+        with col_zt3:
+            z_normalize = st.checkbox("Normalize", key="zscore_normalize")
+        
+        if z_normalize:
+            col_zn1, col_zn2 = st.columns(2)
+            with col_zn1:
+                z_y_min = st.number_input("Min", value=0.0, step=1.0, key="zscore_y_min")
+            with col_zn2:
+                z_y_max = st.number_input("Max", value=100.0, step=1.0, key="zscore_y_max")
+        else:
+            z_y_min, z_y_max = None, None
+    
+    # Apply transforms to all price series
+    series_transformed = pd.Series(
+        apply_transforms(
+            series.values,
+            y_offset=z_y_offset,
+            y_scale=z_y_scale,
+            normalize_to=(z_y_min, z_y_max) if z_normalize else None
+        ),
+        index=series.index
+    )
+    
+    rolling_mean_transformed = pd.Series(
+        apply_transforms(
+            rolling_mean.values,
+            y_offset=z_y_offset,
+            y_scale=z_y_scale,
+            normalize_to=(z_y_min, z_y_max) if z_normalize else None
+        ),
+        index=rolling_mean.index
+    )
+    
+    rolling_std_transformed = rolling_std * z_y_scale  # Scale std dev
+    
+    series_list_transformed = []
+    if compare_mode:
+        for s in series_list:
+            s_trans = pd.Series(
+                apply_transforms(
+                    s.values,
+                    y_offset=z_y_offset,
+                    y_scale=z_y_scale,
+                    normalize_to=(z_y_min, z_y_max) if z_normalize else None
+                ),
+                index=s.index
+            )
+            series_list_transformed.append(s_trans)
+    
     # Chart
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
                         subplot_titles=("Price & Bands", "Z-Score"))
     
     # Add primary series
-    fig.add_trace(go.Scatter(x=series.index, y=series, name=f"{title} (Price)", line=dict(color='black')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=rolling_mean.index, y=rolling_mean, name=f"{title} (Mean)", line=dict(color='blue', dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series.index, y=rolling_mean + rolling_std*entry_z, name="Upper Band", line=dict(color='red', dash='dash'), opacity=0.5), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series.index, y=rolling_mean - rolling_std*entry_z, name="Lower Band", fill='tonexty', fillcolor='rgba(255,0,0,0.1)', line=dict(color='green', dash='dash'), opacity=0.5), row=1, col=1)
+    fig.add_trace(go.Scatter(x=series_transformed.index, y=series_transformed, name=f"{title} (Price)", line=dict(color='black')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=rolling_mean_transformed.index, y=rolling_mean_transformed, name=f"{title} (Mean)", line=dict(color='blue', dash='dot')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=series_transformed.index, y=rolling_mean_transformed + rolling_std_transformed*entry_z, name="Upper Band", line=dict(color='red', dash='dash'), opacity=0.5), row=1, col=1)
+    fig.add_trace(go.Scatter(x=series_transformed.index, y=rolling_mean_transformed - rolling_std_transformed*entry_z, name="Lower Band", fill='tonexty', fillcolor='rgba(255,0,0,0.1)', line=dict(color='green', dash='dash'), opacity=0.5), row=1, col=1)
     
     # Add comparison series prices if in comparison mode
     if compare_mode:
         colors = ['orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'magenta']
-        for i, s in enumerate(series_list[1:]):
+        for i, s in enumerate(series_list_transformed[1:]):
             fig.add_trace(go.Scatter(x=s.index, y=s, name=f"{titles_list[i+1]} (Price)", line=dict(color=colors[i % len(colors)]), opacity=0.7), row=1, col=1)
     
     # Z-Score main
@@ -418,10 +507,56 @@ with tab_corr:
         col_c1.metric("Correlation (Overall)", f"{corr:.4f}")
         col_c2.metric("Sample Size", len(aligned_df))
         
+        # Transform Controls
+        with st.expander("📐 Transform Controls (optional)"):
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                st.markdown(f"**{title1}**")
+                y1_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="corr_y1_offset")
+                y1_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key="corr_y1_scale")
+                norm1 = st.checkbox("Normalize to range", key="corr_norm1")
+                if norm1:
+                    y1_min = st.number_input("Min", value=0.0, step=1.0, key="corr_y1_min")
+                    y1_max = st.number_input("Max", value=100.0, step=1.0, key="corr_y1_max")
+                else:
+                    y1_min, y1_max = None, None
+            
+            with col_t2:
+                st.markdown(f"**{title2}**")
+                y2_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="corr_y2_offset")
+                y2_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key="corr_y2_scale")
+                norm2 = st.checkbox("Normalize to range", key="corr_norm2")
+                if norm2:
+                    y2_min = st.number_input("Min", value=0.0, step=1.0, key="corr_y2_min")
+                    y2_max = st.number_input("Max", value=100.0, step=1.0, key="corr_y2_max")
+                else:
+                    y2_min, y2_max = None, None
+        
+        # Apply transforms
+        series1_transformed = pd.Series(
+            apply_transforms(
+                series1.values,
+                y_offset=y1_offset,
+                y_scale=y1_scale,
+                normalize_to=(y1_min, y1_max) if norm1 else None
+            ),
+            index=series1.index
+        )
+        
+        series2_transformed = pd.Series(
+            apply_transforms(
+                series2.values,
+                y_offset=y2_offset,
+                y_scale=y2_scale,
+                normalize_to=(y2_min, y2_max) if norm2 else None
+            ),
+            index=series2.index
+        )
+        
         # Chart 1: Time Series
         fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=series1.index, y=series1, name=title1, yaxis='y'))
-        fig1.add_trace(go.Scatter(x=series2.index, y=series2, name=title2, yaxis='y2'))
+        fig1.add_trace(go.Scatter(x=series1_transformed.index, y=series1_transformed, name=title1, yaxis='y'))
+        fig1.add_trace(go.Scatter(x=series2_transformed.index, y=series2_transformed, name=title2, yaxis='y2'))
         fig1.update_layout(
             title="Time Series Comparison",
             yaxis=dict(title=title1),
@@ -747,11 +882,33 @@ with tab_range:
                             key=f"curve_type_{i}"
                         )
                     
+                    # Transform controls for this curve
+                    st.markdown("**Transforms (optional)**")
+                    col_t1, col_t2, col_t3 = st.columns(3)
+                    with col_t1:
+                        y_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key=f"curve_y_offset_{i}")
+                    with col_t2:
+                        y_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key=f"curve_y_scale_{i}")
+                    with col_t3:
+                        normalize = st.checkbox("Normalize", key=f"curve_norm_{i}")
+                    
+                    if normalize:
+                        col_n1, col_n2 = st.columns(2)
+                        with col_n1:
+                            y_min = st.number_input("Min", value=0.0, step=1.0, key=f"curve_y_min_{i}")
+                        with col_n2:
+                            y_max = st.number_input("Max", value=100.0, step=1.0, key=f"curve_y_max_{i}")
+                    else:
+                        y_min, y_max = None, None
+                    
                     curves_config.append({
                         'date': curve_date,
                         'dataset': dataset,
                         'type': curve_type,
-                        'color': colors[i % len(colors)]
+                        'color': colors[i % len(colors)],
+                        'y_offset': y_offset,
+                        'y_scale': y_scale,
+                        'normalize_to': (y_min, y_max) if normalize else None
                     })
             
             # Build the figure
@@ -765,9 +922,17 @@ with tab_range:
                     config['date']
                 )
                 if labels:
+                    # Apply transforms
+                    values_transformed = apply_transforms(
+                        values,
+                        y_offset=config['y_offset'],
+                        y_scale=config['y_scale'],
+                        normalize_to=config['normalize_to']
+                    )
+                    
                     fig_curve.add_trace(go.Scatter(
                         x=labels,
-                        y=values,
+                        y=values_transformed,
                         mode='lines+markers',
                         name=f"{config['dataset']} {config['type']} ({config['date'].date()})",
                         line=dict(color=config['color']),
