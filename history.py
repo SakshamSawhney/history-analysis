@@ -688,28 +688,11 @@ with tab_range:
             st.plotly_chart(fig_fb, use_container_width=True)
     
     with tab_r3:
-        st.subheader("Curve Comparison (Single Day)")
+        st.subheader("Curve Comparison (Multi-Date)")
         
         curve_dates = df_master.index.sort_values()
         if not curve_dates.empty:
-            curve_date = st.selectbox("Select Date", curve_dates, index=len(curve_dates)-1, key="curve_date")
-            
-            col_c1, col_c2, col_c3 = st.columns(3)
-            with col_c1:
-                ds_c1 = st.selectbox("Dataset 1", ["LOIS", "ER"], key="curve_ds1")
-            with col_c2:
-                type_c1 = st.selectbox("Type 1", ["Outright", "Spread", "Fly"], key="curve_type1")
-            with col_c3:
-                include_c2 = st.checkbox("Compare 2nd", value=False, key="curve_compare")
-            
-            if include_c2:
-                col_c4, col_c5, col_c6 = st.columns(3)
-                with col_c4:
-                    ds_c2 = st.selectbox("Dataset 2", ["LOIS", "ER"], key="curve_ds2", index=1)
-                with col_c5:
-                    type_c2 = st.selectbox("Type 2", ["Outright", "Spread", "Fly"], key="curve_type2", index=1)
-            
-            # Build curves
+            # Build curves helper function
             def get_curve_data(df_master, prefix, c_type, date_val):
                 cols = sorted([c for c in df_master.columns if c.startswith(prefix + "_") and "_F" in c], 
                              key=lambda x: get_contract_num(x))
@@ -734,21 +717,70 @@ with tab_range:
                 
                 return labels, values
             
-            labels1, values1 = get_curve_data(df_master, ds_c1, type_c1, curve_date)
+            # Number of curves to compare
+            num_curves = st.number_input("Number of curves to compare", 1, 10, 2, 1, key="num_curves")
             
+            curves_config = []
+            colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+            
+            for i in range(int(num_curves)):
+                with st.expander(f"Curve {i+1}", expanded=(i < 2)):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        date_idx = min(len(curve_dates)-1-i, len(curve_dates)-1)
+                        curve_date = st.selectbox(
+                            f"Date",
+                            curve_dates,
+                            index=date_idx,
+                            key=f"curve_date_{i}"
+                        )
+                    with col2:
+                        dataset = st.selectbox(
+                            f"Dataset",
+                            ["LOIS", "ER"],
+                            key=f"curve_ds_{i}"
+                        )
+                    with col3:
+                        curve_type = st.selectbox(
+                            f"Type",
+                            ["Outright", "Spread", "Fly"],
+                            key=f"curve_type_{i}"
+                        )
+                    
+                    curves_config.append({
+                        'date': curve_date,
+                        'dataset': dataset,
+                        'type': curve_type,
+                        'color': colors[i % len(colors)]
+                    })
+            
+            # Build the figure
             fig_curve = go.Figure()
-            if labels1:
-                fig_curve.add_trace(go.Scatter(x=labels1, y=values1, mode='lines+markers', name=f"{ds_c1} {type_c1}"))
             
-            if include_c2:
-                labels2, values2 = get_curve_data(df_master, ds_c2, type_c2, curve_date)
-                if labels2:
-                    fig_curve.add_trace(go.Scatter(x=labels2, y=values2, mode='lines+markers', name=f"{ds_c2} {type_c2}"))
+            for i, config in enumerate(curves_config):
+                labels, values = get_curve_data(
+                    df_master,
+                    config['dataset'],
+                    config['type'],
+                    config['date']
+                )
+                if labels:
+                    fig_curve.add_trace(go.Scatter(
+                        x=labels,
+                        y=values,
+                        mode='lines+markers',
+                        name=f"{config['dataset']} {config['type']} ({config['date'].date()})",
+                        line=dict(color=config['color']),
+                        marker=dict(size=6)
+                    ))
             
             fig_curve.update_layout(
-                title=f"Curve on {curve_date.date()}",
-                xaxis_title="Contract", yaxis_title="Value",
-                height=600, template="plotly_white"
+                title="Yield Curve Comparison",
+                xaxis_title="Contract",
+                yaxis_title="Value",
+                height=600,
+                template="plotly_white",
+                hovermode="x unified"
             )
             st.plotly_chart(fig_curve, use_container_width=True)
     
