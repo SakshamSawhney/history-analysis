@@ -828,13 +828,37 @@ with tab_range:
         curve_dates = df_master.index.sort_values()
         if not curve_dates.empty:
             # Build curves helper function
-            def get_curve_data(df_master, prefix, c_type, date_val):
+            def get_curve_data(df_master, prefix, c_type, date_val, aggregation='Daily'):
                 cols = sorted([c for c in df_master.columns if c.startswith(prefix + "_") and "_F" in c], 
                              key=lambda x: get_contract_num(x))
-                if date_val not in df_master.index or not cols:
+                if not cols:
                     return [], []
                 
-                row = df_master.loc[date_val]
+                # Get the date range for aggregation
+                if aggregation == 'Daily':
+                    if date_val not in df_master.index:
+                        return [], []
+                    row = df_master.loc[date_val]
+                elif aggregation == 'Weekly':
+                    # Get the week containing date_val (Monday to Sunday)
+                    week_start = date_val - pd.Timedelta(days=date_val.weekday())
+                    week_end = week_start + pd.Timedelta(days=6)
+                    week_data = df_master.loc[(df_master.index >= week_start) & (df_master.index <= week_end)]
+                    if week_data.empty:
+                        return [], []
+                    row = week_data.mean()
+                else:  # Monthly
+                    # Get the month containing date_val
+                    month_start = date_val.replace(day=1)
+                    if date_val.month == 12:
+                        month_end = date_val.replace(year=date_val.year + 1, month=1, day=1) - pd.Timedelta(days=1)
+                    else:
+                        month_end = date_val.replace(month=date_val.month + 1, day=1) - pd.Timedelta(days=1)
+                    month_data = df_master.loc[(df_master.index >= month_start) & (df_master.index <= month_end)]
+                    if month_data.empty:
+                        return [], []
+                    row = month_data.mean()
+                
                 labels, values = [], []
                 
                 if c_type == "Outright":
@@ -860,7 +884,7 @@ with tab_range:
             
             for i in range(int(num_curves)):
                 with st.expander(f"Curve {i+1}", expanded=(i < 2)):
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         date_idx = min(len(curve_dates)-1-i, len(curve_dates)-1)
                         curve_date = st.selectbox(
@@ -870,12 +894,18 @@ with tab_range:
                             key=f"curve_date_{i}"
                         )
                     with col2:
+                        aggregation = st.selectbox(
+                            f"Period",
+                            ["Daily", "Weekly", "Monthly"],
+                            key=f"curve_agg_{i}"
+                        )
+                    with col3:
                         dataset = st.selectbox(
                             f"Dataset",
                             ["LOIS", "ER"],
                             key=f"curve_ds_{i}"
                         )
-                    with col3:
+                    with col4:
                         curve_type = st.selectbox(
                             f"Type",
                             ["Outright", "Spread", "Fly"],
@@ -905,6 +935,7 @@ with tab_range:
                         'date': curve_date,
                         'dataset': dataset,
                         'type': curve_type,
+                        'aggregation': aggregation,
                         'color': colors[i % len(colors)],
                         'y_offset': y_offset,
                         'y_scale': y_scale,
@@ -919,7 +950,8 @@ with tab_range:
                     df_master,
                     config['dataset'],
                     config['type'],
-                    config['date']
+                    config['date'],
+                    config['aggregation']
                 )
                 if labels:
                     # Apply transforms
@@ -930,11 +962,17 @@ with tab_range:
                         normalize_to=config['normalize_to']
                     )
                     
+                    # Build name with aggregation info
+                    if config['aggregation'] == 'Daily':
+                        name = f"{config['dataset']} {config['type']} ({config['date'].date()})"
+                    else:
+                        name = f"{config['dataset']} {config['type']} ({config['aggregation']} @ {config['date'].date()})"
+                    
                     fig_curve.add_trace(go.Scatter(
                         x=labels,
                         y=values_transformed,
                         mode='lines+markers',
-                        name=f"{config['dataset']} {config['type']} ({config['date'].date()})",
+                        name=name,
                         line=dict(color=config['color']),
                         marker=dict(size=6)
                     ))
