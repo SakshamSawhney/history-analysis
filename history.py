@@ -8,6 +8,7 @@ import io
 import re
 import scipy.stats as stats
 import datetime
+import ast
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="EUR Rates Analysis (Pro)")
@@ -26,7 +27,81 @@ def get_contract_num(col_name):
     match = re.search(r'(\d+)', str(col_name))
     return int(match.group(1)) if match else 0
 
-def apply_transforms(values, y_offset=0, y_scale=1.0, normalize_to=None):
+def _validate_expr_ast(node):
+    if isinstance(node, ast.Expression):
+        _validate_expr_ast(node.body)
+        return
+
+    if isinstance(node, ast.Lambda):
+        _validate_expr_ast(node.body)
+        return
+
+    if isinstance(node, ast.BinOp):
+        if not isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod)):
+            raise ValueError("Only basic arithmetic operators are allowed")
+        _validate_expr_ast(node.left)
+        _validate_expr_ast(node.right)
+        return
+
+    if isinstance(node, ast.UnaryOp):
+        if not isinstance(node.op, (ast.UAdd, ast.USub)):
+            raise ValueError("Only unary + and - are allowed")
+        _validate_expr_ast(node.operand)
+        return
+
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Attribute):
+            raise ValueError("Only np.<func>(...) calls are allowed")
+        if not isinstance(node.func.value, ast.Name) or node.func.value.id != "np":
+            raise ValueError("Only np.<func>(...) calls are allowed")
+        allowed_funcs = {"abs", "log", "exp", "sqrt", "clip", "where", "maximum", "minimum"}
+        if node.func.attr not in allowed_funcs:
+            raise ValueError(f"np.{node.func.attr} is not allowed")
+        for arg in node.args:
+            _validate_expr_ast(arg)
+        for kw in node.keywords:
+            _validate_expr_ast(kw.value)
+        return
+
+    if isinstance(node, ast.Attribute):
+        if not isinstance(node.value, ast.Name) or node.value.id != "np":
+            raise ValueError("Only np.<const> attributes are allowed")
+        return
+
+    if isinstance(node, ast.Name):
+        if node.id not in {"x", "np"}:
+            raise ValueError("Only 'x' and 'np' are allowed")
+        return
+
+    if isinstance(node, ast.Constant):
+        return
+
+    raise ValueError("Expression contains unsupported syntax")
+
+
+def apply_expression(values, expr):
+    if expr is None:
+        return values
+    expr = expr.strip()
+    if not expr:
+        return values
+
+    values = np.asarray(values, dtype=float)
+    try:
+        tree = ast.parse(expr, mode="eval")
+        body = tree.body
+        if isinstance(body, ast.Lambda):
+            body = body.body
+        _validate_expr_ast(body)
+        code = compile(ast.Expression(body), "<expr>", "eval")
+        result = eval(code, {"np": np, "__builtins__": {}}, {"x": values})
+        return np.asarray(result, dtype=float)
+    except Exception as exc:
+        st.warning(f"Expression error: {exc}")
+        return values
+
+
+def apply_transforms(values, y_offset=0, y_scale=1.0, normalize_to=None, expr=None):
     """
     Apply transformations to y-values.
     
@@ -41,8 +116,11 @@ def apply_transforms(values, y_offset=0, y_scale=1.0, normalize_to=None):
     """
     values = np.asarray(values, dtype=float)
     
+    # Apply custom expression first
+    transformed = apply_expression(values, expr)
+
     # Apply offset and scale
-    transformed = (values * y_scale) + y_offset
+    transformed = (transformed * y_scale) + y_offset
     
     # Normalize to range if specified
     if normalize_to is not None:
@@ -261,12 +339,14 @@ available_cols = get_cols(df_master)
 # =====================================================================
 # FLEXIBLE INSTRUMENT BUILDER FUNCTION FOR ALL TABS
 # =====================================================================
-def build_series_from_selection(df_master, dataset, inst_type, key_base):
+def build_series_from_selection(df_master, dataset, inst_type, key_base, include_spot=True):
     """Build a time series from any combination of dataset/type/legs."""
     
     if inst_type == "Outright":
         cols = get_cols(df_master, dataset + "_")
         cols = [c for c in cols if "_F" in c or "Spot" in c]
+        if not include_spot:
+            cols = [c for c in cols if "Spot" not in c]
         l1 = st.selectbox("Instrument", cols, key=f"{key_base}_l1")
         series = df_master[l1].dropna()
         title = f"{dataset} {inst_type}: {l1}"
@@ -298,6 +378,40 @@ def build_series_from_selection(df_master, dataset, inst_type, key_base):
         title = f"{dataset} {inst_type}: {l1}-{l2}-{l3}"
         return series, title
 
+
+def align_series_to_common_index(series_list):
+    if not series_list:
+        return series_list, None
+
+    common_index = series_list[0].dropna().index
+    for s in series_list[1:]:
+        common_index = common_index.intersection(s.dropna().index)
+
+    if common_index.empty:
+        return series_list, None
+
+    return [s.loc[common_index] for s in series_list], common_index
+
+
+def get_dataset_available_dates(df_master, dataset):
+    cols = [c for c in df_master.columns if c.startswith(dataset + "_")]
+    if not cols:
+        return df_master.index
+    return df_master[cols].dropna(how="all").index
+
+
+def get_instrument_legs(inst_name):
+    return inst_name.split("-")
+
+
+def shared_legs_only_if_exact_match(inst_a, inst_b):
+    legs_a = get_instrument_legs(inst_a)
+    legs_b = get_instrument_legs(inst_b)
+    shared = set(legs_a) & set(legs_b)
+    if not shared:
+        return True
+    return legs_a == legs_b
+
 # Create Tabs
 tab_zscore, tab_corr, tab_regress, tab_range, tab_risk, tab_calendar = st.tabs([
     "📈 Z-Score & Technical",
@@ -328,6 +442,7 @@ with tab_zscore:
     
     series_list = []
     titles_list = []
+    datasets_list = []
     
     if compare_mode:
         num_compare = st.number_input("Number of instruments to compare", 2, 10, 2, 1, key="zscore_num_compare")
@@ -342,6 +457,7 @@ with tab_zscore:
                 ser, tit = build_series_from_selection(df_master, ds, it, f"zscore_comp_{i}")
                 series_list.append(ser)
                 titles_list.append(tit)
+                datasets_list.append(ds)
     else:
         c1, c2 = st.columns(2)
         with c1:
@@ -352,6 +468,20 @@ with tab_zscore:
         series, title = build_series_from_selection(df_master, dataset, inst_type, "zscore")
         series_list.append(series)
         titles_list.append(title)
+        datasets_list.append(dataset)
+
+    # Align to common timeframe when comparing LOIS and ER together
+    use_common_timeframe = False
+    if compare_mode and len(set(datasets_list)) > 1:
+        use_common_timeframe = st.checkbox(
+            "Use only common timeframe values (LOIS vs ER)",
+            value=True,
+            key="zscore_common_timeframe"
+        )
+        if use_common_timeframe:
+            series_list, common_index = align_series_to_common_index(series_list)
+            if common_index is None:
+                st.warning("No overlapping dates between selected series.")
     
     # Calculations for primary series
     series = series_list[0]
@@ -373,6 +503,7 @@ with tab_zscore:
     
     # Transform Controls for Price Series
     with st.expander("📐 Price Transform Controls (optional)", expanded=True):
+        z_expr = st.text_input("Expression (use x)", value="", key="zscore_expr", help="Example: x*100-2 or np.log(x)")
         col_zt1, col_zt2, col_zt3 = st.columns(3)
         with col_zt1:
             z_y_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="zscore_y_offset")
@@ -396,7 +527,8 @@ with tab_zscore:
             series.values,
             y_offset=z_y_offset,
             y_scale=z_y_scale,
-            normalize_to=(z_y_min, z_y_max) if z_normalize else None
+            normalize_to=(z_y_min, z_y_max) if z_normalize else None,
+            expr=z_expr
         ),
         index=series.index
     )
@@ -406,7 +538,8 @@ with tab_zscore:
             rolling_mean.values,
             y_offset=z_y_offset,
             y_scale=z_y_scale,
-            normalize_to=(z_y_min, z_y_max) if z_normalize else None
+            normalize_to=(z_y_min, z_y_max) if z_normalize else None,
+            expr=z_expr
         ),
         index=rolling_mean.index
     )
@@ -421,7 +554,8 @@ with tab_zscore:
                     s.values,
                     y_offset=z_y_offset,
                     y_scale=z_y_scale,
-                    normalize_to=(z_y_min, z_y_max) if z_normalize else None
+                    normalize_to=(z_y_min, z_y_max) if z_normalize else None,
+                    expr=z_expr
                 ),
                 index=s.index
             )
@@ -464,7 +598,7 @@ with tab_zscore:
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=1, col=1)
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=2, col=1)
     
-    fig.update_layout(height=800, template="plotly_white", hovermode="x unified")
+    fig.update_layout(height=1000, template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
     
     # Metrics
@@ -494,12 +628,37 @@ with tab_corr:
         series2, title2 = build_series_from_selection(df_master, ds2, type2, "corr2")
     
     # Align and calculate correlation
-    aligned_df = pd.concat([series1, series2], axis=1).dropna()
+    if ds1 != ds2:
+        use_common_timeframe = st.checkbox(
+            "Use only common timeframe values (LOIS vs ER)",
+            value=True,
+            key="corr_common_timeframe"
+        )
+    else:
+        use_common_timeframe = False
+
+    if use_common_timeframe:
+        aligned_series, common_index = align_series_to_common_index([series1, series2])
+        if common_index is None:
+            aligned_df = pd.DataFrame()
+        else:
+            series1 = aligned_series[0]
+            series2 = aligned_series[1]
+            aligned_df = pd.concat([series1, series2], axis=1).dropna()
+    else:
+        aligned_df = pd.concat([series1, series2], axis=1).dropna()
     if len(aligned_df) > 1:
         corr = aligned_df.corr().iloc[0, 1]
         
         # Rolling correlation
-        rolling_corr_window = st.slider("Rolling Correlation Window", 10, 252, 30, key="corr_window")
+        max_corr_window = max(10, len(aligned_df))
+        rolling_corr_window = st.number_input(
+            "Rolling Correlation Window",
+            min_value=10,
+            max_value=max_corr_window,
+            value=min(30, max_corr_window),
+            key="corr_window"
+        )
         rolling_corr = aligned_df.iloc[:, 0].rolling(rolling_corr_window).corr(aligned_df.iloc[:, 1])
         
         # Metrics
@@ -507,14 +666,22 @@ with tab_corr:
         col_c1.metric("Correlation (Overall)", f"{corr:.4f}")
         col_c2.metric("Sample Size", len(aligned_df))
         
+        # Detect if comparing LOIS vs ER
+        is_lois_vs_er = (ds1 != ds2)
+        
         # Transform Controls
         with st.expander("📐 Transform Controls (optional)", expanded=True):
+            if is_lois_vs_er:
+                # Enhanced controls for LOIS vs ER comparison
+                st.info("🔄 LOIS vs ER comparison: Configure separate transformations and ranges for each dataset")
+            
             col_t1, col_t2 = st.columns(2)
             with col_t1:
                 st.markdown(f"**{title1}**")
-                y1_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="corr_y1_offset")
-                y1_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key="corr_y1_scale")
-                norm1 = st.checkbox("Normalize to range", key="corr_norm1")
+                expr1 = st.text_input("Expression (use x)", value="", key="corr_expr1", help="Example: x*100-2 or np.log(x)")
+                y1_offset = st.number_input("Add (+/-)", value=0.0, step=0.1, format="%.4f", key="corr_y1_offset", help="Constant to add/subtract from values")
+                y1_scale = st.number_input("Multiply (×)", value=1.0, step=0.1, format="%.2f", key="corr_y1_scale", help="Factor to multiply values by")
+                norm1 = st.checkbox("Normalize to range", value=is_lois_vs_er, key="corr_norm1")
                 if norm1:
                     y1_min = st.number_input("Min", value=0.0, step=1.0, key="corr_y1_min")
                     y1_max = st.number_input("Max", value=100.0, step=1.0, key="corr_y1_max")
@@ -523,9 +690,10 @@ with tab_corr:
             
             with col_t2:
                 st.markdown(f"**{title2}**")
-                y2_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key="corr_y2_offset")
-                y2_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key="corr_y2_scale")
-                norm2 = st.checkbox("Normalize to range", key="corr_norm2")
+                expr2 = st.text_input("Expression (use x)", value="", key="corr_expr2", help="Example: x*100-2 or np.log(x)")
+                y2_offset = st.number_input("Add (+/-)", value=0.0, step=0.1, format="%.4f", key="corr_y2_offset", help="Constant to add/subtract from values")
+                y2_scale = st.number_input("Multiply (×)", value=1.0, step=0.1, format="%.2f", key="corr_y2_scale", help="Factor to multiply values by")
+                norm2 = st.checkbox("Normalize to range", value=is_lois_vs_er, key="corr_norm2")
                 if norm2:
                     y2_min = st.number_input("Min", value=0.0, step=1.0, key="corr_y2_min")
                     y2_max = st.number_input("Max", value=100.0, step=1.0, key="corr_y2_max")
@@ -538,7 +706,8 @@ with tab_corr:
                 series1.values,
                 y_offset=y1_offset,
                 y_scale=y1_scale,
-                normalize_to=(y1_min, y1_max) if norm1 else None
+                normalize_to=(y1_min, y1_max) if norm1 else None,
+                expr=expr1
             ),
             index=series1.index
         )
@@ -548,20 +717,30 @@ with tab_corr:
                 series2.values,
                 y_offset=y2_offset,
                 y_scale=y2_scale,
-                normalize_to=(y2_min, y2_max) if norm2 else None
+                normalize_to=(y2_min, y2_max) if norm2 else None,
+                expr=expr2
             ),
             index=series2.index
         )
         
-        # Chart 1: Time Series
+        # Chart 1: Time Series with dual y-axes
         fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=series1_transformed.index, y=series1_transformed, name=title1, yaxis='y'))
-        fig1.add_trace(go.Scatter(x=series2_transformed.index, y=series2_transformed, name=title2, yaxis='y2'))
+        fig1.add_trace(go.Scatter(x=series1_transformed.index, y=series1_transformed, name=title1, yaxis='y', line=dict(color='blue')))
+        fig1.add_trace(go.Scatter(x=series2_transformed.index, y=series2_transformed, name=title2, yaxis='y2', line=dict(color='red')))
         fig1.update_layout(
-            title="Time Series Comparison",
-            yaxis=dict(title=title1),
-            yaxis2=dict(title=title2, overlaying='y', side='right'),
-            height=450, template="plotly_white"
+            title="Time Series Comparison (Dual Axes)",
+            yaxis=dict(
+                title=dict(text=f"{title1} (Left)", font=dict(color='blue')),
+                side='left',
+                tickfont=dict(color='blue')
+            ),
+            yaxis2=dict(
+                title=dict(text=f"{title2} (Right)", font=dict(color='red')),
+                overlaying='y',
+                side='right',
+                tickfont=dict(color='red')
+            ),
+            height=600, template="plotly_white"
         )
         st.plotly_chart(fig1, use_container_width=True)
         
@@ -571,7 +750,7 @@ with tab_corr:
         fig2.update_layout(
             title=f"Scatter: {title1} vs {title2}",
             xaxis_title=title1, yaxis_title=title2,
-            height=450, template="plotly_white"
+            height=600, template="plotly_white"
         )
         st.plotly_chart(fig2, use_container_width=True)
         
@@ -581,7 +760,7 @@ with tab_corr:
         fig3.add_hline(y=0, line_dash="dash", line_color="grey")
         fig3.update_layout(
             title=f"Rolling Correlation ({rolling_corr_window}D)",
-            yaxis_title="Correlation", height=450, template="plotly_white"
+            yaxis_title="Correlation", height=600, template="plotly_white"
         )
         st.plotly_chart(fig3, use_container_width=True)
     else:
@@ -599,7 +778,7 @@ with tab_regress:
         st.subheader("Regression: Any Two Instruments")
         
         reg_window = st.slider("Regression Window (Days)", 30, 252, 90, key="reg_window")
-        use_pct = st.checkbox("Use % Change", value=True, key="reg_use_pct")
+        use_bp_change = st.checkbox("Use bp change", value=True, key="reg_use_bp_change")
         
         col_x, col_y = st.columns(2)
         
@@ -616,9 +795,9 @@ with tab_regress:
             series_y, title_y = build_series_from_selection(df_master, ds_y, type_y, "reg_y")
         
         # Prepare data
-        if use_pct:
-            series_x = series_x.pct_change().replace([np.inf, -np.inf], np.nan)
-            series_y = series_y.pct_change().replace([np.inf, -np.inf], np.nan)
+        if use_bp_change:
+            series_x = series_x.diff() * 100
+            series_y = series_y.diff() * 100
         
         reg_df = pd.concat([series_x, series_y], axis=1).iloc[-reg_window:].dropna()
         
@@ -643,7 +822,7 @@ with tab_regress:
                 fig.update_layout(
                     title=f"{title_y} vs {title_x}",
                     xaxis_title=title_x, yaxis_title=title_y,
-                    height=600, template="plotly_white"
+                    height=750, template="plotly_white"
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -673,11 +852,11 @@ with tab_regress:
                     candidates = get_cols(df_master, search_dataset + "_")
                     candidates = [c for c in candidates if c not in [series_target.name]]
                 
-                target_chg = series_target.pct_change().iloc[-hedge_window:].dropna()
+                target_chg = (series_target.diff() * 100).iloc[-hedge_window:].dropna()
                 results = []
                 
                 for cand in candidates:
-                    cand_chg = df_master[cand].pct_change().iloc[-hedge_window:].dropna()
+                    cand_chg = (df_master[cand].diff() * 100).iloc[-hedge_window:].dropna()
                     df_align = pd.concat([target_chg, cand_chg], axis=1).dropna()
                     
                     if len(df_align) < 30:
@@ -798,15 +977,18 @@ with tab_range:
             type_b = st.selectbox("Type", ["Outright", "Spread", "Fly"], key="fb_type_b", index=1)
             ser_b, title_b = build_series_from_selection(df_master, ds_b, type_b, "fb_b")
         
+        # Calculate changes
         x_chg = ser_f.diff().dropna()
         y_chg = ser_b.diff().dropna()
         fb_df = pd.concat([x_chg, y_chg], axis=1).dropna()
         
         if len(fb_df) > 1:
+            # --- 1. STANDARD CONTEMPORANEOUS REGRESSION ---
             m, b, r, p, err = stats.linregress(fb_df.iloc[:, 0], fb_df.iloc[:, 1])
             
+            st.markdown("### Contemporaneous Relationship (Same Day)")
             col_fb_m1, col_fb_m2, col_fb_m3 = st.columns(3)
-            col_fb_m1.metric("Beta", f"{float(m):.4f}")
+            col_fb_m1.metric("Beta (Same Day)", f"{float(m):.4f}")
             col_fb_m2.metric("R-Squared", f"{float(r**2):.4f}")
             col_fb_m3.metric("P-Value", f"{float(p):.4f}")
             
@@ -816,11 +998,145 @@ with tab_range:
             y_line = m * x_line + b
             fig_fb.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', name='Regression', line=dict(color='red')))
             fig_fb.update_layout(
-                title="Front-to-Back Transmission",
+                title="Same Day Movement Correlation",
                 xaxis_title=f"Δ {title_f}", yaxis_title=f"Δ {title_b}",
-                height=600, template="plotly_white"
+                height=550, template="plotly_white"
             )
             st.plotly_chart(fig_fb, use_container_width=True)
+
+            # --- 2. LEAD / LAG ANALYSIS ---
+            st.markdown("### Lead/Lag Analysis")
+            st.caption("Analyzes if movements in Front predict movements in Back with a time delay (or vice versa).")
+            
+            max_lag = st.slider("Max Lag Days to Test", 1, 30, 10, key="fb_max_lag")
+            
+            lags = np.arange(-max_lag, max_lag + 1)
+            corrs = []
+            
+            # Calculate Cross-Correlation for each lag
+            for lag in lags:
+                # Lag > 0: Front leads Back (Corr(Front_t, Back_{t+lag}))
+                # Lag < 0: Back leads Front
+                # To correlate Front(t) with Back(t+lag), shift Back by -lag
+                shifted_y = y_chg.shift(-lag)
+                c = x_chg.corr(shifted_y)
+                corrs.append(c)
+            
+            # Find optimal lag
+            best_idx = np.argmax(np.abs(corrs))
+            best_lag = lags[best_idx]
+            best_corr = corrs[best_idx]
+            
+            # Plot Cross-Correlation Function
+            fig_lag = go.Figure()
+            fig_lag.add_trace(go.Bar(x=lags, y=corrs, name="Correlation", marker_color='lightblue'))
+            fig_lag.add_trace(go.Scatter(x=lags, y=corrs, mode='lines', line=dict(color='blue'), name='Trend'))
+            
+            # Highlight peak
+            fig_lag.add_trace(go.Scatter(
+                x=[best_lag],
+                y=[best_corr],
+                mode='markers',
+                marker=dict(size=15, color='red', symbol='star'),
+                name='Peak Correlation'
+            ))
+            
+            fig_lag.update_layout(
+                title="Cross-Correlation Function (Front vs Back)",
+                xaxis_title="Lag (Days) [Positive = Front Leads]",
+                yaxis_title="Correlation Coefficient",
+                height=550, template="plotly_white"
+            )
+            st.plotly_chart(fig_lag, use_container_width=True)
+            
+            # Interpretation Logic
+            col_l1, col_l2, col_l3 = st.columns(3)
+            col_l1.metric("Optimal Lag (Days)", best_lag)
+            col_l2.metric("Correlation at Lag", f"{best_corr:.4f}")
+            
+            # Calculate R² and p-value for optimal lag
+            if best_lag > 0:
+                y_lagged_temp = y_chg.shift(-best_lag)
+                x_lagged_temp = x_chg
+            elif best_lag < 0:
+                y_lagged_temp = x_chg.shift(-best_lag)
+                x_lagged_temp = y_chg
+            else:
+                y_lagged_temp = y_chg
+                x_lagged_temp = x_chg
+            
+            df_temp_reg = pd.concat([x_lagged_temp, y_lagged_temp], axis=1).dropna()
+            if len(df_temp_reg) > 2:
+                _, _, r_temp, p_temp, _ = stats.linregress(df_temp_reg.iloc[:, 0], df_temp_reg.iloc[:, 1])
+                r_squared_lag = r_temp**2
+                col_l3.metric("R² at Optimal Lag", f"{r_squared_lag:.4f}")
+                
+                # Add p-value below the metrics
+                st.caption(f"**p-value at Optimal Lag:** {p_temp:.4e}")
+
+            # Comparison table for optimal lag
+            st.markdown("### Lagged Comparison Table")
+            shifted_y_best = y_chg.shift(-best_lag)
+            df_compare = pd.concat([x_chg, shifted_y_best], axis=1).dropna()
+            df_compare.columns = [f"Δ {title_f} (t)", f"Δ {title_b} (t+{best_lag})"]
+            rows_to_show = st.number_input(
+                "Rows to display",
+                min_value=5,
+                max_value=min(200, len(df_compare)) if len(df_compare) > 0 else 5,
+                value=min(20, len(df_compare)) if len(df_compare) > 0 else 5,
+                key="fb_lag_table_rows"
+            )
+            st.dataframe(df_compare.head(int(rows_to_show)), use_container_width=True)
+            
+            # --- 3. REGRESSION AT OPTIMAL LAG ---
+            # Regress the lagger against the leader shifted by the lag
+            if best_lag != 0:
+                st.markdown("### Regression at Optimal Lag")
+                
+                if best_lag > 0:
+                    # Front Leads Back. Predict Back(t+lag) using Front(t)
+                    st.info(f"Front contract leads Back contract by {best_lag} days.")
+                    st.latex(r"\Delta \text{Back}_{t+" + str(best_lag) + r"} = \beta \cdot \Delta \text{Front}_t + \alpha")
+                    
+                    y_lagged = y_chg.shift(-best_lag)
+                    x_lagged = x_chg
+                    x_label = f"Δ {title_f} (t)"
+                    y_label = f"Δ {title_b} (t+{best_lag})"
+                else:
+                    # Back Leads Front. Predict Front(t+lag) using Back(t)
+                    st.info(f"Back contract leads Front contract by {abs(best_lag)} days.")
+                    st.latex(r"\Delta \text{Front}_{t+" + str(abs(best_lag)) + r"} = \beta \cdot \Delta \text{Back}_t + \alpha")
+                    
+                    y_lagged = x_chg.shift(-best_lag)
+                    x_lagged = y_chg
+                    x_label = f"Δ {title_b} (t)"
+                    y_label = f"Δ {title_f} (t+{abs(best_lag)})"
+                
+                # Create aligned dataframe for regression
+                df_lag_reg = pd.concat([x_lagged, y_lagged], axis=1).dropna()
+                
+                if len(df_lag_reg) > 10:
+                    m_lag, b_lag, r_lag, p_lag, _ = stats.linregress(df_lag_reg.iloc[:, 0], df_lag_reg.iloc[:, 1])
+                    
+                    col_l3.metric("Lagged Beta", f"{m_lag:.4f}")
+                    
+                    # Plot Lagged Regression
+                    fig_lag_reg = go.Figure()
+                    fig_lag_reg.add_trace(go.Scatter(x=df_lag_reg.iloc[:, 0], y=df_lag_reg.iloc[:, 1], mode='markers', name='Observations'))
+                    
+                    # Add regression line
+                    x_line_lag = np.array([df_lag_reg.iloc[:, 0].min(), df_lag_reg.iloc[:, 0].max()])
+                    y_line_lag = m_lag * x_line_lag + b_lag
+                    fig_lag_reg.add_trace(go.Scatter(x=x_line_lag, y=y_line_lag, mode='lines', name='Regression', line=dict(color='red')))
+                    
+                    fig_lag_reg.update_layout(
+                        title="Lagged Regression Plot",
+                        xaxis_title=x_label, yaxis_title=y_label,
+                        height=550, template="plotly_white"
+                    )
+                    st.plotly_chart(fig_lag_reg, use_container_width=True)
+            else:
+                col_l3.metric("Lagged Beta", "N/A (Same Day)")
     
     with tab_r3:
         st.subheader("Curve Comparison (Multi-Date)")
@@ -912,13 +1228,14 @@ with tab_range:
                             key=f"curve_type_{i}"
                         )
                     
-                    # Transform controls for this curve
+                    # Individual transform controls for each curve
                     st.markdown("**Transforms (optional)**")
                     col_t1, col_t2, col_t3 = st.columns(3)
                     with col_t1:
-                        y_offset = st.number_input("Y offset", value=0.0, step=0.1, format="%.4f", key=f"curve_y_offset_{i}")
+                        curve_expr = st.text_input("Expression (use x)", value="", key=f"curve_expr_{i}", help="Example: x*100-2 or np.log(x)")
+                        y_offset = st.number_input("Add (+/-)", value=0.0, step=0.1, format="%.4f", key=f"curve_y_offset_{i}", help="Constant to add/subtract")
                     with col_t2:
-                        y_scale = st.number_input("Y scale", value=1.0, step=0.1, format="%.2f", key=f"curve_y_scale_{i}")
+                        y_scale = st.number_input("Multiply (×)", value=1.0, step=0.1, format="%.2f", key=f"curve_y_scale_{i}", help="Factor to multiply by")
                     with col_t3:
                         normalize = st.checkbox("Normalize", key=f"curve_norm_{i}")
                     
@@ -928,8 +1245,9 @@ with tab_range:
                             y_min = st.number_input("Min", value=0.0, step=1.0, key=f"curve_y_min_{i}")
                         with col_n2:
                             y_max = st.number_input("Max", value=100.0, step=1.0, key=f"curve_y_max_{i}")
+                        normalize_to = (y_min, y_max)
                     else:
-                        y_min, y_max = None, None
+                        normalize_to = None
                     
                     curves_config.append({
                         'date': curve_date,
@@ -939,13 +1257,38 @@ with tab_range:
                         'color': colors[i % len(colors)],
                         'y_offset': y_offset,
                         'y_scale': y_scale,
-                        'normalize_to': (y_min, y_max) if normalize else None
+                        'normalize_to': normalize_to,
+                        'expr': curve_expr
                     })
+
+            # Align curves to common timeframe when LOIS and ER are both selected
+            datasets_selected = {c['dataset'] for c in curves_config}
+            use_common_timeframe = False
+            if "LOIS" in datasets_selected and "ER" in datasets_selected:
+                use_common_timeframe = st.checkbox(
+                    "Use only common timeframe values (LOIS vs ER)",
+                    value=True,
+                    key="curve_common_timeframe"
+                )
+                lois_dates = get_dataset_available_dates(df_master, "LOIS")
+                er_dates = get_dataset_available_dates(df_master, "ER")
+                common_curve_dates = lois_dates.intersection(er_dates)
+            else:
+                common_curve_dates = None
             
             # Build the figure
             fig_curve = go.Figure()
             
+            info_shown = False
             for i, config in enumerate(curves_config):
+                if use_common_timeframe and config['aggregation'] != 'Daily' and not info_shown:
+                    st.info("Common timeframe alignment applies only to Daily curves.")
+                    info_shown = True
+
+                if use_common_timeframe and config['aggregation'] == 'Daily' and common_curve_dates is not None:
+                    if config['date'] not in common_curve_dates:
+                        st.warning(f"Skipping {config['dataset']} curve on {config['date'].date()} (not in common timeframe).")
+                        continue
                 labels, values = get_curve_data(
                     df_master,
                     config['dataset'],
@@ -959,7 +1302,8 @@ with tab_range:
                         values,
                         y_offset=config['y_offset'],
                         y_scale=config['y_scale'],
-                        normalize_to=config['normalize_to']
+                        normalize_to=config['normalize_to'],
+                        expr=config.get('expr')
                     )
                     
                     # Build name with aggregation info
@@ -981,7 +1325,7 @@ with tab_range:
                 title="Yield Curve Comparison",
                 xaxis_title="Contract",
                 yaxis_title="Value",
-                height=600,
+                height=750,
                 template="plotly_white",
                 hovermode="x unified"
             )
@@ -991,10 +1335,12 @@ with tab_range:
         st.subheader("Correlation & Regression Matrix")
         st.markdown("Calculate correlations and regression metrics for all instrument pairs or anchor vs all.")
 
-        def build_all_instruments(df_master, prefix, inst_type):
+        def build_all_instruments(df_master, prefix, inst_type, include_spot=True):
             """Build all instruments of a given type."""
             cols = get_cols(df_master, prefix + "_")
             cols = [c for c in cols if "_F" in c or "Spot" in c]
+            if not include_spot:
+                cols = [c for c in cols if "Spot" not in c]
             inst_dict = {}
 
             if inst_type == "Outright":
@@ -1028,7 +1374,30 @@ with tab_range:
                 key="corr_reg_mode"
             )
         with col_m2:
-            corr_window = st.number_input("Regression Window (Days)", 30, 252, 90, key="corr_window_input")
+            max_corr_window = max(10, len(df_master))
+            corr_window = st.number_input(
+                "Correlation Window (Days)",
+                min_value=10,
+                max_value=max_corr_window,
+                value=min(60, max_corr_window),
+                key="corr_window_input"
+            )
+
+        max_reg_window = max(30, len(df_master))
+        reg_window = st.number_input(
+            "Regression Window (Days)",
+            min_value=30,
+            max_value=max_reg_window,
+            value=min(90, max_reg_window),
+            key="reg_window_input"
+        )
+
+        include_spot = st.checkbox("Include Spot", value=True, key="matrix_include_spot")
+        require_same_side = st.checkbox(
+            "Disallow shared-leg mismatches",
+            value=False,
+            key="matrix_same_side"
+        )
 
         if matrix_mode == "All pairs (same type)":
             col_a1, col_a2 = st.columns(2)
@@ -1045,7 +1414,7 @@ with tab_range:
                 anchor_type = st.selectbox("Anchor Type", ["Outright", "Spread", "Fly"], key="anchor_type")
 
             anchor_series, anchor_title = build_series_from_selection(
-                df_master, anchor_market, anchor_type, "anchor_matrix"
+                df_master, anchor_market, anchor_type, "anchor_matrix", include_spot=include_spot
             )
             anchor_name = anchor_title.split(": ", 1)[1] if ": " in anchor_title else anchor_title
 
@@ -1061,16 +1430,32 @@ with tab_range:
                     key="target_types"
                 )
 
+        # Analysis type selection
+        analysis_type = st.radio(
+            "Analysis Type",
+            ["Contemporaneous", "Lead/Lag"],
+            key="matrix_analysis_type",
+            horizontal=True
+        )
+        
+        max_lag_matrix = 10
+        if analysis_type == "Lead/Lag":
+            max_lag_matrix = st.slider(
+                "Max Lag Days to Test",
+                1, 30, 10,
+                key="matrix_max_lag"
+            )
+
         if st.button("Calculate Correlation & Regression Matrix", key="calc_corr_reg"):
             if matrix_mode == "All pairs (same type)":
-                inst_dict = build_all_instruments(df_master, corr_market, corr_type)
+                inst_dict = build_all_instruments(df_master, corr_market, corr_type, include_spot=include_spot)
                 inst_names = list(inst_dict.keys())
 
                 if len(inst_names) < 2:
                     st.warning(f"Need at least 2 {corr_type} instruments to calculate correlations.")
                     st.stop()
 
-                with st.spinner("Calculating correlations and regressions..."):
+                with st.spinner(f"Calculating {'lead/lag' if analysis_type == 'Lead/Lag' else 'contemporaneous'} analysis..."):
                     results = []
 
                     for i in range(len(inst_names)):
@@ -1078,32 +1463,94 @@ with tab_range:
                             inst1_name = inst_names[i]
                             inst2_name = inst_names[j]
 
+                            if require_same_side and not shared_legs_only_if_exact_match(inst1_name, inst2_name):
+                                continue
+
                             ser1 = inst_dict[inst1_name]
                             ser2 = inst_dict[inst2_name]
 
-                            pct1 = ser1.pct_change().replace([np.inf, -np.inf], np.nan)
-                            pct2 = ser2.pct_change().replace([np.inf, -np.inf], np.nan)
+                            pct1 = ser1.diff() * 100
+                            pct2 = ser2.diff() * 100
 
-                            aligned_df = pd.concat([pct1, pct2], axis=1).iloc[-corr_window:].dropna()
+                            if analysis_type == "Lead/Lag":
+                                # Lead/Lag Analysis
+                                analysis_df = pd.concat([pct1, pct2], axis=1).iloc[-reg_window:].dropna()
+                                
+                                if len(analysis_df) < 30:
+                                    continue
+                                
+                                x_chg = analysis_df.iloc[:, 0]
+                                y_chg = analysis_df.iloc[:, 1]
+                                
+                                # Calculate cross-correlation for all lags
+                                lags = np.arange(-max_lag_matrix, max_lag_matrix + 1)
+                                corrs = []
+                                
+                                for lag in lags:
+                                    shifted_y = y_chg.shift(-lag)
+                                    c = x_chg.corr(shifted_y)
+                                    corrs.append(c)
+                                
+                                # Find optimal lag
+                                best_idx = np.argmax(np.abs(corrs))
+                                best_lag = lags[best_idx]
+                                best_corr = corrs[best_idx]
+                                
+                                # Calculate regression at optimal lag
+                                if best_lag > 0:
+                                    y_lagged = y_chg.shift(-best_lag)
+                                    x_lagged = x_chg
+                                elif best_lag < 0:
+                                    y_lagged = x_chg.shift(-best_lag)
+                                    x_lagged = y_chg
+                                else:
+                                    y_lagged = y_chg
+                                    x_lagged = x_chg
+                                
+                                df_lag_reg = pd.concat([x_lagged, y_lagged], axis=1).dropna()
+                                
+                                if len(df_lag_reg) > 10:
+                                    slope, intercept, r_value, p_value, std_err = stats.linregress(
+                                        df_lag_reg.iloc[:, 0], df_lag_reg.iloc[:, 1]
+                                    )
+                                    
+                                    results.append({
+                                        "Instrument 1": inst1_name,
+                                        "Instrument 2": inst2_name,
+                                        "Best Lag": best_lag,
+                                        "Correlation": best_corr,
+                                        "Beta": slope,
+                                        "R-Squared": r_value**2,
+                                        "P-Value": p_value,
+                                        "Observations": len(df_lag_reg)
+                                    })
+                            else:
+                                # Contemporaneous Analysis
+                                corr_df = pd.concat([pct1, pct2], axis=1).iloc[-corr_window:].dropna()
+                                reg_df = pd.concat([pct1, pct2], axis=1).iloc[-reg_window:].dropna()
 
-                            if len(aligned_df) < 30:
-                                continue
+                                if len(reg_df) < 30:
+                                    continue
 
-                            corr = aligned_df.corr().iloc[0, 1]
-                            x_vals = aligned_df.iloc[:, 0].to_numpy()
-                            y_vals = aligned_df.iloc[:, 1].to_numpy()
-                            slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
+                                if len(corr_df) < 2:
+                                    continue
 
-                            results.append({
-                                "Instrument 1": inst1_name,
-                                "Instrument 2": inst2_name,
-                                "Correlation": corr,
-                                "Beta": slope,
-                                "R-Squared": r_value**2,
-                                "P-Value": p_value,
-                                "Observations": len(aligned_df)
-                            })
+                                corr = corr_df.corr().iloc[0, 1]
+                                x_vals = reg_df.iloc[:, 0].to_numpy()
+                                y_vals = reg_df.iloc[:, 1].to_numpy()
+                                slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
+
+                                results.append({
+                                    "Instrument 1": inst1_name,
+                                    "Instrument 2": inst2_name,
+                                    "Correlation": corr,
+                                    "Beta": slope,
+                                    "R-Squared": r_value**2,
+                                    "P-Value": p_value,
+                                    "Observations": len(reg_df)
+                                })
             else:
+                # Anchor vs All mode
                 if anchor_series.empty:
                     st.warning("Anchor series has no data.")
                     st.stop()
@@ -1114,59 +1561,140 @@ with tab_range:
 
                 target_dict = {}
                 for t_type in target_types:
-                    for name, ser in build_all_instruments(df_master, target_market, t_type).items():
+                    for name, ser in build_all_instruments(df_master, target_market, t_type, include_spot=include_spot).items():
                         target_dict[name] = (t_type, ser)
 
                 if not target_dict:
                     st.warning("No target instruments found for the selected types.")
                     st.stop()
 
-                with st.spinner("Calculating correlations and regressions..."):
+                with st.spinner(f"Calculating {'lead/lag' if analysis_type == 'Lead/Lag' else 'contemporaneous'} analysis..."):
                     results = []
-                    anchor_pct = anchor_series.pct_change().replace([np.inf, -np.inf], np.nan)
+                    anchor_pct = anchor_series.diff() * 100
 
                     for target_name, (target_type, target_ser) in target_dict.items():
                         if target_name == anchor_name:
                             continue
 
-                        target_pct = target_ser.pct_change().replace([np.inf, -np.inf], np.nan)
-                        aligned_df = pd.concat([anchor_pct, target_pct], axis=1).iloc[-corr_window:].dropna()
-
-                        if len(aligned_df) < 30:
+                        if require_same_side and not shared_legs_only_if_exact_match(anchor_name, target_name):
                             continue
 
-                        corr = aligned_df.corr().iloc[0, 1]
-                        x_vals = aligned_df.iloc[:, 0].to_numpy()
-                        y_vals = aligned_df.iloc[:, 1].to_numpy()
-                        slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
+                        target_pct = target_ser.diff() * 100
+                        
+                        if analysis_type == "Lead/Lag":
+                            # Lead/Lag Analysis
+                            analysis_df = pd.concat([anchor_pct, target_pct], axis=1).iloc[-reg_window:].dropna()
+                            
+                            if len(analysis_df) < 30:
+                                continue
+                            
+                            x_chg = analysis_df.iloc[:, 0]
+                            y_chg = analysis_df.iloc[:, 1]
+                            
+                            # Calculate cross-correlation for all lags
+                            lags = np.arange(-max_lag_matrix, max_lag_matrix + 1)
+                            corrs = []
+                            
+                            for lag in lags:
+                                shifted_y = y_chg.shift(-lag)
+                                c = x_chg.corr(shifted_y)
+                                corrs.append(c)
+                            
+                            # Find optimal lag
+                            best_idx = np.argmax(np.abs(corrs))
+                            best_lag = lags[best_idx]
+                            best_corr = corrs[best_idx]
+                            
+                            # Calculate regression at optimal lag
+                            if best_lag > 0:
+                                y_lagged = y_chg.shift(-best_lag)
+                                x_lagged = x_chg
+                            elif best_lag < 0:
+                                y_lagged = x_chg.shift(-best_lag)
+                                x_lagged = y_chg
+                            else:
+                                y_lagged = y_chg
+                                x_lagged = x_chg
+                            
+                            df_lag_reg = pd.concat([x_lagged, y_lagged], axis=1).dropna()
+                            
+                            if len(df_lag_reg) > 10:
+                                slope, intercept, r_value, p_value, std_err = stats.linregress(
+                                    df_lag_reg.iloc[:, 0], df_lag_reg.iloc[:, 1]
+                                )
+                                
+                                results.append({
+                                    "Anchor": anchor_title,
+                                    "Instrument": target_name,
+                                    "Type": target_type,
+                                    "Best Lag": best_lag,
+                                    "Correlation": best_corr,
+                                    "Beta": slope,
+                                    "R-Squared": r_value**2,
+                                    "P-Value": p_value,
+                                    "Observations": len(df_lag_reg)
+                                })
+                        else:
+                            # Contemporaneous Analysis
+                            corr_df = pd.concat([anchor_pct, target_pct], axis=1).iloc[-corr_window:].dropna()
+                            reg_df = pd.concat([anchor_pct, target_pct], axis=1).iloc[-reg_window:].dropna()
 
-                        results.append({
-                            "Anchor": anchor_title,
-                            "Instrument": target_name,
-                            "Type": target_type,
-                            "Correlation": corr,
-                            "Beta": slope,
-                            "R-Squared": r_value**2,
-                            "P-Value": p_value,
-                            "Observations": len(aligned_df)
-                        })
+                            if len(reg_df) < 30:
+                                continue
+
+                            if len(corr_df) < 2:
+                                continue
+
+                            corr = corr_df.corr().iloc[0, 1]
+                            x_vals = reg_df.iloc[:, 0].to_numpy()
+                            y_vals = reg_df.iloc[:, 1].to_numpy()
+                            slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
+
+                            results.append({
+                                "Anchor": anchor_title,
+                                "Instrument": target_name,
+                                "Type": target_type,
+                                "Correlation": corr,
+                                "Beta": slope,
+                                "R-Squared": r_value**2,
+                                "P-Value": p_value,
+                                "Observations": len(reg_df)
+                            })
 
             if results:
-                df_results = pd.DataFrame(results).sort_values("Correlation", ascending=False)
+                df_results = pd.DataFrame(results).sort_values("Correlation", ascending=False, key=abs)
 
-                styled = df_results.style.format({
-                    "Correlation": "{:.4f}",
-                    "Beta": "{:.4f}",
-                    "R-Squared": "{:.4f}",
-                    "P-Value": "{:.4f}"
-                })
+                # Format based on analysis type
+                if analysis_type == "Lead/Lag":
+                    format_dict = {
+                        "Best Lag": "{:.0f}",
+                        "Correlation": "{:.4f}",
+                        "Beta": "{:.4f}",
+                        "R-Squared": "{:.4f}",
+                        "P-Value": "{:.4f}"
+                    }
+                    styled = df_results.style.format(format_dict)
+                    styled = styled.background_gradient(subset=["Best Lag"], cmap="RdYlGn_r", vmin=-max_lag_matrix, vmax=max_lag_matrix)
+                else:
+                    format_dict = {
+                        "Correlation": "{:.4f}",
+                        "Beta": "{:.4f}",
+                        "R-Squared": "{:.4f}",
+                        "P-Value": "{:.4f}"
+                    }
+                    styled = df_results.style.format(format_dict)
+                
                 styled = styled.background_gradient(subset=["Correlation", "R-Squared"], cmap="RdYlGn", vmin=-1, vmax=1)
                 styled = styled.background_gradient(subset=["Beta"], cmap="RdBu_r")
 
-                st.dataframe(styled, use_container_width=True, height=600)
-                st.info(f"**Total pairs calculated:** {len(df_results)}")
+                st.dataframe(styled, use_container_width=True, height=700)
+                
+                if analysis_type == "Lead/Lag":
+                    st.info(f"**Total pairs calculated:** {len(df_results)} | Positive lag = Instrument 1 leads, Negative lag = Instrument 2 leads")
+                else:
+                    st.info(f"**Total pairs calculated:** {len(df_results)}")
             else:
-                st.warning("No valid pairs found for regression analysis.")
+                st.warning("No valid pairs found for analysis.")
 
 # =====================================================================
 # TAB 5: RISK MANAGEMENT
