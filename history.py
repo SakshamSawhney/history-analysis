@@ -294,6 +294,9 @@ with st.sidebar:
     show_events_on_charts = st.checkbox("Show ECB Dates on Charts", value=False, key="show_events_global")
     if show_events_on_charts:
         st.caption("Red=Hike, Green=Cut, Grey=Hold")
+    
+    st.markdown("### 📊 Raw Data Viewer")
+    show_raw_data = st.checkbox("Show Raw Data", value=False, key="show_raw_data")
 
 # Load Market Data
 df_lois, source_lois = load_sheet(FILE_PATH, "LOIS", backup_data=LOIS_BACKUP_DATA)
@@ -335,6 +338,51 @@ def get_cols(df, prefix=None):
     return sorted(cols, key=lambda x: get_contract_num(x))
 
 available_cols = get_cols(df_master)
+
+# ---------------------------------------------------------
+# RAW DATA VIEWER (if toggle enabled)
+# ---------------------------------------------------------
+if show_raw_data:
+    with st.expander("📋 View Raw Data", expanded=True):
+        col_data1, col_data2 = st.columns(2)
+        
+        with col_data1:
+            dataset_choice = st.selectbox("Select Dataset", ["Combined (Master)", "LOIS Only", "ER Only"], key="raw_data_dataset")
+        
+        with col_data2:
+            display_rows = st.number_input("Rows to display", min_value=5, max_value=min(2000, len(df_master)), value=min(20, len(df_master)), step=5, key="raw_data_rows")
+        
+        if dataset_choice == "Combined (Master)":
+            st.dataframe(df_master.head(int(display_rows)), use_container_width=True)
+        elif dataset_choice == "LOIS Only":
+            if df_lois is not None:
+                st.dataframe(df_lois.head(int(display_rows)), use_container_width=True)
+            else:
+                st.info("LOIS data not available")
+        else:  # ER Only
+            if df_er is not None:
+                st.dataframe(df_er.head(int(display_rows)), use_container_width=True)
+            else:
+                st.info("ER data not available")
+        
+        # Data summary stats
+        st.markdown("### Data Summary")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        
+        if dataset_choice == "Combined (Master)":
+            data_to_summarize = df_master
+        elif dataset_choice == "LOIS Only":
+            data_to_summarize = df_lois
+        else:
+            data_to_summarize = df_er
+        
+        if data_to_summarize is not None and not data_to_summarize.empty:
+            col_s1.metric("Total Rows", len(data_to_summarize))
+            col_s2.metric("Total Columns", len(data_to_summarize.columns))
+            col_s3.metric("Date Range", f"{data_to_summarize.index.min().date()} to {data_to_summarize.index.max().date()}")
+            
+            st.markdown("### Column Statistics")
+            st.dataframe(data_to_summarize.describe().round(4), use_container_width=True)
 
 # =====================================================================
 # FLEXIBLE INSTRUMENT BUILDER FUNCTION FOR ALL TABS
@@ -561,35 +609,110 @@ with tab_zscore:
             )
             series_list_transformed.append(s_trans)
     
-    # Chart
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
-                        subplot_titles=("Price & Bands", "Z-Score"))
+    # Toggle controls for chart visibility
+    st.markdown("### 📊 Chart Display Options")
+    col_toggle1, col_toggle2, col_toggle3 = st.columns(3)
     
-    # Add primary series
-    fig.add_trace(go.Scatter(x=series_transformed.index, y=series_transformed, name=f"{title} (Price)", line=dict(color='black')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=rolling_mean_transformed.index, y=rolling_mean_transformed, name=f"{title} (Mean)", line=dict(color='blue', dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series_transformed.index, y=rolling_mean_transformed + rolling_std_transformed*entry_z, name="Upper Band", line=dict(color='red', dash='dash'), opacity=0.5), row=1, col=1)
-    fig.add_trace(go.Scatter(x=series_transformed.index, y=rolling_mean_transformed - rolling_std_transformed*entry_z, name="Lower Band", fill='tonexty', fillcolor='rgba(255,0,0,0.1)', line=dict(color='green', dash='dash'), opacity=0.5), row=1, col=1)
+    with col_toggle1:
+        show_mean_line = st.checkbox("Show Mean Line", value=False, key="zscore_show_mean")
+    with col_toggle2:
+        show_bands = st.checkbox("Show Bands", value=False, key="zscore_show_bands")
+    with col_toggle3:
+        show_signals = st.checkbox("Show Z-Score Signals", value=False, key="zscore_show_signals")
+    
+    # Create synchronized subplots
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True, 
+        row_heights=[0.65, 0.35],
+        subplot_titles=("Price & Bands", "Z-Score"),
+        vertical_spacing=0.12
+    )
+    
+    # ===== PRICE & BANDS CHART (Row 1) =====
+    # Add primary series price
+    fig.add_trace(go.Scatter(
+        x=series_transformed.index, 
+        y=series_transformed, 
+        name=f"{title} (Price)", 
+        line=dict(color='black', width=2)
+    ), row=1, col=1)
+    
+    # Add mean line if enabled
+    if show_mean_line:
+        fig.add_trace(go.Scatter(
+            x=rolling_mean_transformed.index, 
+            y=rolling_mean_transformed, 
+            name=f"{title} (Mean)", 
+            line=dict(color='blue', dash='dot', width=2)
+        ), row=1, col=1)
+    
+    # Add bands if enabled
+    if show_bands:
+        fig.add_trace(go.Scatter(
+            x=series_transformed.index, 
+            y=rolling_mean_transformed + rolling_std_transformed*entry_z, 
+            name="Upper Band", 
+            line=dict(color='red', dash='dash', width=1),
+            opacity=0.5
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=series_transformed.index, 
+            y=rolling_mean_transformed - rolling_std_transformed*entry_z, 
+            name="Lower Band", 
+            fill='tonexty', 
+            fillcolor='rgba(255,0,0,0.1)', 
+            line=dict(color='green', dash='dash', width=1),
+            opacity=0.5
+        ), row=1, col=1)
     
     # Add comparison series prices if in comparison mode
     if compare_mode:
         colors = ['orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'magenta']
         for i, s in enumerate(series_list_transformed[1:]):
-            fig.add_trace(go.Scatter(x=s.index, y=s, name=f"{titles_list[i+1]} (Price)", line=dict(color=colors[i % len(colors)]), opacity=0.7), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=s.index, 
+                y=s, 
+                name=f"{titles_list[i+1]} (Price)", 
+                line=dict(color=colors[i % len(colors)], width=1.5),
+                opacity=0.7
+            ), row=1, col=1)
     
-    # Z-Score main
-    fig.add_trace(go.Scatter(x=z_score.index, y=z_score, name=f"{title} (Z-Score)", line=dict(color='purple')), row=2, col=1)
-    signals = z_score[((z_score > entry_z) | (z_score < -entry_z))]
-    fig.add_trace(go.Scatter(x=signals.index, y=signals, mode='markers', name='Signal', marker=dict(color='red', size=8)), row=2, col=1)
+    # ===== Z-SCORE CHART (Row 2) =====
+    # Add Z-Score main
+    fig.add_trace(go.Scatter(
+        x=z_score.index, 
+        y=z_score, 
+        name=f"{title} (Z-Score)", 
+        line=dict(color='purple', width=2)
+    ), row=2, col=1)
+    
+    # Add signals if enabled
+    if show_signals:
+        signals = z_score[((z_score > entry_z) | (z_score < -entry_z))]
+        fig.add_trace(go.Scatter(
+            x=signals.index, 
+            y=signals, 
+            mode='markers', 
+            name='Signal', 
+            marker=dict(color='red', size=8)
+        ), row=2, col=1)
     
     # Add comparison Z-scores
     if compare_mode:
         colors = ['orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'magenta']
         for i, z_comp in enumerate(z_score_list[1:]):
-            fig.add_trace(go.Scatter(x=z_comp.index, y=z_comp, name=f"{titles_list[i+1]} (Z-Score)", line=dict(color=colors[i % len(colors)]), opacity=0.7), row=2, col=1)
+            fig.add_trace(go.Scatter(
+                x=z_comp.index, 
+                y=z_comp, 
+                name=f"{titles_list[i+1]} (Z-Score)", 
+                line=dict(color=colors[i % len(colors)], width=1.5),
+                opacity=0.7
+            ), row=2, col=1)
     
     fig.add_hline(y=entry_z, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=-entry_z, line_dash="dash", line_color="green", row=2, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.3, row=2, col=1)
     
     # Add ECB events if enabled
     if show_events_on_charts:
@@ -598,7 +721,15 @@ with tab_zscore:
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=1, col=1)
             fig.add_vline(x=row['Date'], line=dict(color=color, width=1, dash="dot"), row=2, col=1)
     
-    fig.update_layout(height=1000, template="plotly_white", hovermode="x unified")
+    fig.update_layout(
+        height=1000, 
+        template="plotly_white", 
+        hovermode="x unified"
+    )
+    
+    # Move shared x-axis to top
+    fig.update_xaxes(side="top")
+    
     st.plotly_chart(fig, use_container_width=True)
     
     # Metrics
