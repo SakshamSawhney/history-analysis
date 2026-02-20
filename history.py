@@ -173,8 +173,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals(
 FILE_NAME = "LOIS 12th Feb.xlsx"
 FILE_PATH = os.path.join(SCRIPT_DIR, FILE_NAME)
 
-@st.cache_data
-def load_sheet(file_path, sheet_name, backup_data=None):
+@st.cache_data(ttl=300)  # Cache for 5 minutes, then reload
+def load_sheet(file_path, sheet_name, backup_data=None, _file_mtime=None):
     df = None
     source = "File"
     
@@ -279,6 +279,11 @@ if 'ecb_calendar' not in st.session_state:
 # SIDEBAR: GLOBAL TOGGLES (Early Setup)
 # ---------------------------------------------------------
 with st.sidebar:
+    st.markdown("### 🔄 Data Management")
+    if st.button("🔃 Refresh Data", help="Clear cache and reload Excel file"):
+        st.cache_data.clear()
+        st.rerun()
+    
     st.markdown("### 🔄 Data Conversion (ER)")
     er_subtract_toggle = st.checkbox("100 - value", value=False, key="er_subtract")
     
@@ -299,8 +304,9 @@ with st.sidebar:
     show_raw_data = st.checkbox("Show Raw Data", value=False, key="show_raw_data")
 
 # Load Market Data
-df_lois, source_lois = load_sheet(FILE_PATH, "LOIS", backup_data=LOIS_BACKUP_DATA)
-df_er, source_er = load_sheet(FILE_PATH, "ER", backup_data=None)
+file_mtime = os.path.getmtime(FILE_PATH) if os.path.exists(FILE_PATH) else None
+df_lois, source_lois = load_sheet(FILE_PATH, "LOIS", backup_data=LOIS_BACKUP_DATA, _file_mtime=file_mtime)
+df_er, source_er = load_sheet(FILE_PATH, "ER", backup_data=None, _file_mtime=file_mtime)
 
 # Apply ER conversion if enabled
 if er_subtract_toggle and df_er is not None:
