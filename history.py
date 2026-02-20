@@ -1536,6 +1536,20 @@ with tab_range:
                 corr_market = st.selectbox("Market", ["LOIS", "ER"], key="corr_market")
             with col_a2:
                 corr_type = st.selectbox("Instrument Type", ["Outright", "Spread", "Fly"], key="corr_type")
+            
+            # Add search/filter for instruments
+            st.markdown("**Instrument Filter**")
+            col_f1, col_f2 = st.columns([2, 1])
+            with col_f1:
+                inst_search = st.text_input(
+                    "Search instruments (regex allowed)",
+                    value="",
+                    placeholder="e.g., F[1-3], Spot, LOIS_F",
+                    help="Filter instruments by name pattern. Leave empty to include all.",
+                    key="matrix_inst_search"
+                )
+            with col_f2:
+                st.caption("Leave empty to show all")
         else:
             st.markdown("**Anchor**")
             col_anchor1, col_anchor2 = st.columns(2)
@@ -1560,6 +1574,20 @@ with tab_range:
                     default=["Outright", "Spread", "Fly"],
                     key="target_types"
                 )
+            
+            # Add search/filter for target instruments
+            st.markdown("**Target Instrument Filter**")
+            col_f1, col_f2 = st.columns([2, 1])
+            with col_f1:
+                target_search = st.text_input(
+                    "Search target instruments (regex allowed)",
+                    value="",
+                    placeholder="e.g., F[1-3], Spread, F1-F2",
+                    help="Filter target instruments by name pattern. Leave empty to include all.",
+                    key="matrix_target_search"
+                )
+            with col_f2:
+                st.caption("Leave empty to show all")
 
         # Analysis type selection
         analysis_type = st.radio(
@@ -1582,8 +1610,18 @@ with tab_range:
                 inst_dict = build_all_instruments(df_master, corr_market, corr_type, include_spot=include_spot)
                 inst_names = list(inst_dict.keys())
 
+                # Apply search filter if provided
+                if inst_search.strip():
+                    try:
+                        import re
+                        pattern = re.compile(inst_search, re.IGNORECASE)
+                        inst_names = [name for name in inst_names if pattern.search(name)]
+                    except re.error:
+                        st.error(f"Invalid regex pattern: {inst_search}")
+                        st.stop()
+
                 if len(inst_names) < 2:
-                    st.warning(f"Need at least 2 {corr_type} instruments to calculate correlations.")
+                    st.warning(f"Need at least 2 {corr_type} instruments to calculate correlations. After filtering: {len(inst_names)} instruments found.")
                     st.stop()
 
                 with st.spinner(f"Calculating {'lead/lag' if analysis_type == 'Lead/Lag' else 'contemporaneous'} analysis..."):
@@ -1695,8 +1733,18 @@ with tab_range:
                     for name, ser in build_all_instruments(df_master, target_market, t_type, include_spot=include_spot).items():
                         target_dict[name] = (t_type, ser)
 
+                # Apply search filter if provided
+                if target_search.strip():
+                    try:
+                        import re
+                        pattern = re.compile(target_search, re.IGNORECASE)
+                        target_dict = {name: data for name, data in target_dict.items() if pattern.search(name)}
+                    except re.error:
+                        st.error(f"Invalid regex pattern: {target_search}")
+                        st.stop()
+
                 if not target_dict:
-                    st.warning("No target instruments found for the selected types.")
+                    st.warning("No target instruments found for the selected types and filters.")
                     st.stop()
 
                 with st.spinner(f"Calculating {'lead/lag' if analysis_type == 'Lead/Lag' else 'contemporaneous'} analysis..."):
