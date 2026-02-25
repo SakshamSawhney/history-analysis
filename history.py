@@ -1281,7 +1281,33 @@ with tab_range:
         curve_dates = df_master.index.sort_values()
         if not curve_dates.empty:
             # Build curves helper function
-            def get_curve_data(df_master, prefix, c_type, date_val, aggregation='Daily'):
+            def get_available_labels(df_master, prefix, c_type):
+                """Get all available labels for a given curve type."""
+                cols = sorted([c for c in df_master.columns if c.startswith(prefix + "_") and "_F" in c], 
+                             key=lambda x: get_contract_num(x))
+                if not cols:
+                    return []
+                
+                labels = []
+                if c_type == "Outright":
+                    for col in cols:
+                        labels.append(col.split("_")[1])
+                elif c_type == "Spread":
+                    # Generate all possible spreads (not just consecutive)
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            label = f"{cols[i].split('_')[1]}-{cols[j].split('_')[1]}"
+                            labels.append(label)
+                else:  # Fly
+                    # Generate all possible flies (not just consecutive)
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            for k in range(j+1, len(cols)):
+                                label = f"{cols[i].split('_')[1]}-{cols[j].split('_')[1]}-{cols[k].split('_')[1]}"
+                                labels.append(label)
+                return labels
+            
+            def get_curve_data(df_master, prefix, c_type, date_val, aggregation='Daily', selected_labels=None):
                 cols = sorted([c for c in df_master.columns if c.startswith(prefix + "_") and "_F" in c], 
                              key=lambda x: get_contract_num(x))
                 if not cols:
@@ -1313,19 +1339,35 @@ with tab_range:
                     row = month_data.mean()
                 
                 labels, values = [], []
+                all_labels = get_available_labels(df_master, prefix, c_type)
+                
+                # If no labels selected, use all available labels
+                if selected_labels is None or len(selected_labels) == 0:
+                    selected_labels = all_labels
                 
                 if c_type == "Outright":
                     for col in cols:
-                        labels.append(col.split("_")[1])
-                        values.append(row.get(col, np.nan))
+                        label = col.split("_")[1]
+                        if label in selected_labels:
+                            labels.append(label)
+                            values.append(row.get(col, np.nan))
                 elif c_type == "Spread":
-                    for i in range(len(cols)-1):
-                        labels.append(f"{cols[i].split('_')[1]}-{cols[i+1].split('_')[1]}")
-                        values.append(row.get(cols[i], np.nan) - row.get(cols[i+1], np.nan))
+                    # Generate all possible spreads
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            label = f"{cols[i].split('_')[1]}-{cols[j].split('_')[1]}"
+                            if label in selected_labels:
+                                labels.append(label)
+                                values.append(row.get(cols[i], np.nan) - row.get(cols[j], np.nan))
                 else:  # Fly
-                    for i in range(len(cols)-2):
-                        labels.append(f"{cols[i].split('_')[1]}-{cols[i+1].split('_')[1]}-{cols[i+2].split('_')[1]}")
-                        values.append((row.get(cols[i], np.nan) + row.get(cols[i+2], np.nan)) - (2*row.get(cols[i+1], np.nan)))
+                    # Generate all possible flies
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            for k in range(j+1, len(cols)):
+                                label = f"{cols[i].split('_')[1]}-{cols[j].split('_')[1]}-{cols[k].split('_')[1]}"
+                                if label in selected_labels:
+                                    labels.append(label)
+                                    values.append((row.get(cols[i], np.nan) + row.get(cols[k], np.nan)) - (2*row.get(cols[j], np.nan)))
                 
                 return labels, values
             
@@ -1365,6 +1407,19 @@ with tab_range:
                             key=f"curve_type_{i}"
                         )
                     
+                    # Get available labels and add multiselect
+                    available_labels = get_available_labels(df_master, dataset, curve_type)
+                    if available_labels:
+                        selected_labels = st.multiselect(
+                            f"Select {curve_type}s to display",
+                            available_labels,
+                            default=available_labels,
+                            key=f"curve_labels_{i}"
+                        )
+                    else:
+                        selected_labels = []
+                        st.warning(f"No {curve_type}s available for {dataset} dataset")
+                    
                     # Individual transform controls for each curve
                     st.markdown("**Transforms (optional)**")
                     col_t1, col_t2, col_t3 = st.columns(3)
@@ -1395,7 +1450,8 @@ with tab_range:
                         'y_offset': y_offset,
                         'y_scale': y_scale,
                         'normalize_to': normalize_to,
-                        'expr': curve_expr
+                        'expr': curve_expr,
+                        'selected_labels': selected_labels
                     })
 
             # Align curves to common timeframe when LOIS and ER are both selected
@@ -1431,7 +1487,8 @@ with tab_range:
                     config['dataset'],
                     config['type'],
                     config['date'],
-                    config['aggregation']
+                    config['aggregation'],
+                    selected_labels=config.get('selected_labels')
                 )
                 if labels:
                     # Apply transforms
