@@ -499,19 +499,93 @@ with tab_zscore:
     datasets_list = []
     
     if compare_mode:
-        num_compare = st.number_input("Number of instruments to compare", 2, 10, 2, 1, key="zscore_num_compare")
-        for i in range(int(num_compare)):
-            with st.expander(f"Instrument {i+1}", expanded=True):
-                c1, c2 = st.columns(2)
-                with c1:
-                    ds = st.selectbox("Dataset", ["LOIS", "ER"], key=f"zscore_comp_ds_{i}")
-                with c2:
-                    it = st.selectbox("Type", ["Outright", "Spread", "Fly"], key=f"zscore_comp_type_{i}")
-                
-                ser, tit = build_series_from_selection(df_master, ds, it, f"zscore_comp_{i}")
-                series_list.append(ser)
-                titles_list.append(tit)
-                datasets_list.append(ds)
+        st.markdown("---")
+        st.subheader("Save/Generate Sets for Comparison")
+        if 'comparison_sets' not in st.session_state:
+            st.session_state['comparison_sets'] = {}
+        set_action = st.radio("Set Action", ["Manual Select", "Auto Generate by Delta"], key="zscore_set_action")
+        if set_action == "Manual Select":
+            num_compare = st.number_input("Number of instruments to compare", 2, 10, 2, 1, key="zscore_num_compare")
+            manual_contracts = []
+            for i in range(int(num_compare)):
+                with st.expander(f"Instrument {i+1}", expanded=True):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        ds = st.selectbox("Dataset", ["LOIS", "ER"], key=f"zscore_comp_ds_{i}")
+                    with c2:
+                        it = st.selectbox("Type", ["Outright", "Spread", "Fly"], key=f"zscore_comp_type_{i}")
+                    ser, tit = build_series_from_selection(df_master, ds, it, f"zscore_comp_{i}")
+                    manual_contracts.append((ds, it, tit, ser))
+                    series_list.append(ser)
+                    titles_list.append(tit)
+                    datasets_list.append(ds)
+            set_name = st.text_input("Set Name (Manual)", key="zscore_manual_set_name")
+            if st.button("Save Set (Manual)", key="zscore_save_manual_set") and set_name:
+                st.session_state['comparison_sets'][set_name] = [t[2] for t in manual_contracts]
+                st.success(f"Manual set '{set_name}' saved!")
+        else:
+            ds = st.selectbox("Dataset", ["LOIS", "ER"], key="zscore_auto_ds")
+            it = st.selectbox("Type", ["Spread", "Fly"], key="zscore_auto_type")
+            delta = st.number_input("Delta (e.g. 1 for F1-F2, 2 for F1-F3)", 1, 10, 1, 1, key="zscore_auto_delta")
+            # Get all columns for the dataset
+            cols = [c for c in get_cols(df_master, ds + "_") if "_F" in c]
+            auto_titles = []
+            if it == "Spread":
+                for i in range(len(cols) - delta):
+                    l1, l2 = cols[i], cols[i+delta]
+                    title = f"{ds} {it}: {l1}-{l2}"
+                    auto_titles.append(title)
+            elif it == "Fly":
+                for i in range(len(cols) - 2*delta):
+                    l1, l2, l3 = cols[i], cols[i+delta], cols[i+2*delta]
+                    title = f"{ds} {it}: {l1}-{l2}-{l3}"
+                    auto_titles.append(title)
+            st.write(f"Auto-generated {it}s with delta {delta}:", auto_titles)
+            set_name = st.text_input("Set Name (Auto)", key="zscore_auto_set_name")
+            if st.button("Save Set (Auto)", key="zscore_save_auto_set") and set_name:
+                st.session_state['comparison_sets'][set_name] = auto_titles
+                st.success(f"Auto set '{set_name}' saved!")
+            # Optionally, add to comparison for preview
+            if st.checkbox("Preview this set", key="zscore_preview_auto_set") and auto_titles:
+                for title in auto_titles:
+                    # Parse legs from title
+                    parts = title.split(": ")[1].split(":")[-1].split("-")
+                    if it == "Spread":
+                        l1, l2 = parts[0], parts[1]
+                        ser = (df_master[l1] - df_master[l2]).dropna()
+                        series_list.append(ser)
+                        titles_list.append(title)
+                        datasets_list.append(ds)
+                    elif it == "Fly":
+                        l1, l2, l3 = parts[0], parts[1], parts[2]
+                        ser = ((df_master[l1] + df_master[l3]) - 2*df_master[l2]).dropna()
+                        series_list.append(ser)
+                        titles_list.append(title)
+                        datasets_list.append(ds)
+        st.write("Saved Sets:", st.session_state['comparison_sets'])
+        # Allow loading a set for comparison
+        if st.session_state['comparison_sets']:
+            set_to_load = st.selectbox("Load Saved Set for Comparison", list(st.session_state['comparison_sets'].keys()), key="zscore_load_set")
+            if st.button("Load Set", key="zscore_do_load_set"):
+                loaded_titles = st.session_state['comparison_sets'][set_to_load]
+                # For each title, try to parse and add to comparison
+                for title in loaded_titles:
+                    if ": " in title:
+                        meta, legs = title.split(": ")
+                        ds, it = meta.split()
+                        parts = legs.split("-")
+                        if it == "Spread" and len(parts) == 2:
+                            l1, l2 = parts[0], parts[1]
+                            ser = (df_master[l1] - df_master[l2]).dropna()
+                            series_list.append(ser)
+                            titles_list.append(title)
+                            datasets_list.append(ds)
+                        elif it == "Fly" and len(parts) == 3:
+                            l1, l2, l3 = parts[0], parts[1], parts[2]
+                            ser = ((df_master[l1] + df_master[l3]) - 2*df_master[l2]).dropna()
+                            series_list.append(ser)
+                            titles_list.append(title)
+                            datasets_list.append(ds)
     else:
         c1, c2 = st.columns(2)
         with c1:
